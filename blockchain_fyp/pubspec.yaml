@@ -1,0 +1,26 @@
+name: blockchain_fyp
+description: A Blockchain-Based Secure File Sharing and Communication System
+version: 1.0.0
+environment:
+  sdk: '>=2.19.0 <3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  web3dart: ^2.7.1
+  http: ^1.2.2
+  url_launcher: ^6.3.0
+  provider: ^6.1.2
+  walletconnect_flutter_v2: ^2.1.8 # Added
+  get_it: ^7.7.0 # Added
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/contract_abi.json
