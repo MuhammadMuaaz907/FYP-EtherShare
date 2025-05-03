@@ -99,7 +99,7 @@ class _LoginScreenState extends State<LoginScreen> {
       _connectResponse = await _web3App!.connect(
         requiredNamespaces: {
           'eip155': const RequiredNamespace(
-            chains: ['eip155:5777'], // Ganache chain ID
+            chains: ['eip155:1337'], // Ganache chain ID
             methods: ['eth_sign', 'eth_signTransaction', 'eth_sendTransaction'],
             events: ['accountsChanged', 'chainChanged'],
           ),

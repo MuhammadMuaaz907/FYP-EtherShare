@@ -63,7 +63,7 @@ class ContractService {
           parameters: [],
           maxGas: 5000000,
         ),
-        chainId: 5777,
+        chainId: 1337,
       );
       return result;
     } catch (e) {
@@ -84,7 +84,7 @@ class ContractService {
           parameters: [],
           maxGas: 5000000,
         ),
-        chainId: 5777,
+        chainId: 1337,
       );
       return result;
     } catch (e) {
