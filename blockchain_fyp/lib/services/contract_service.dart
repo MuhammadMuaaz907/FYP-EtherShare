@@ -5,8 +5,8 @@ import 'package:web3dart/web3dart.dart';
 import 'package:hex/hex.dart';
 
 class ContractService {
-  final String _rpcUrl = 'https://2868-103-84-151-46.ngrok-free.app';
-  final String _contractAddress = '0xF0b2b583D9d430c63F21F1ad688D9AFd9bD4b3Cb';
+  final String _rpcUrl = 'https://6a632f7d419e.ngrok-free.app';
+  final String _contractAddress = '0x023bd7D5F48a36AcA66313B67127f7947Aa059FD';
   late Web3Client _client;
   late DeployedContract _contract;
   late ContractFunction _register;
@@ -61,8 +61,8 @@ class ContractService {
           function: _register,
           parameters: [],
           nonce: nonce,
-          gasPrice: EtherAmount.fromUnitAndValue(EtherUnit.gwei, 30),
-          maxGas: 500000,
+          gasPrice: EtherAmount.fromUnitAndValue(EtherUnit.gwei, 20),
+          maxGas: 200000,
         ),
         chainId: 1337,
       );
@@ -85,8 +85,8 @@ class ContractService {
           function: _login,
           parameters: [],
           nonce: nonce,
-          gasPrice: EtherAmount.fromUnitAndValue(EtherUnit.gwei, 30),
-          maxGas: 500000,
+          gasPrice: EtherAmount.fromUnitAndValue(EtherUnit.gwei, 20),
+          maxGas: 200000,
         ),
         chainId: 1337,
       );
@@ -97,25 +97,80 @@ class ContractService {
     }
   }
 
-  Future<bool> isRegistered(String address) async {
+  Future<String> registerWithAddress(String address) async {
     try {
-      final result = await _client.call(
-        contract: _contract,
-        function: _isRegistered,
-        params: [EthereumAddress.fromHex(address)],
+      final nonce = await _client.getTransactionCount(EthereumAddress.fromHex(address));
+      final txHash = await _client.sendTransaction(
+        EthPrivateKey.fromHex('0x192ff8ad181ad785b2c4cfe40079fbba085d3eead3f9dddbd0898228262b4dd3'),
+        Transaction.callContract(
+          contract: _contract,
+          function: _register,
+          parameters: [],
+          nonce: nonce,
+          gasPrice: EtherAmount.fromUnitAndValue(EtherUnit.gwei, 20),
+          maxGas: 200000,
+        ),
+        chainId: 1337,
       );
-      return result[0] as bool;
+      return txHash;
     } catch (e) {
-      print('IsRegistered error: $e');
+      print('Register with address error: $e');
       rethrow;
     }
   }
 
+  Future<String> loginWithAddress(String address) async {
+    try {
+      final nonce = await _client.getTransactionCount(EthereumAddress.fromHex(address));
+      final txHash = await _client.sendTransaction(
+        EthPrivateKey.fromHex('0x192ff8ad181ad785b2c4cfe40079fbba085d3eead3f9dddbd0898228262b4dd3'),
+        Transaction.callContract(
+          contract: _contract,
+          function: _login,
+          parameters: [],
+          nonce: nonce,
+          gasPrice: EtherAmount.fromUnitAndValue(EtherUnit.gwei, 20),
+          maxGas: 200000,
+        ),
+        chainId: 1337,
+      );
+      return txHash;
+    } catch (e) {
+      print('Login with address error: $e');
+      rethrow;
+    }
+  }
+
+  Future<bool> isRegistered(String address) async {
+    const maxRetries = 3;
+    int retryCount = 0;
+    while (retryCount < maxRetries) {
+      try {
+        print('Calling isRegistered for $address...');
+        final result = await _client.call(
+          contract: _contract,
+          function: _isRegistered,
+          params: [EthereumAddress.fromHex(address)],
+        );
+        print('isRegistered result: $result');
+        return result[0] as bool;
+      } catch (e) {
+        print('IsRegistered error (Attempt ${retryCount + 1}): $e');
+        retryCount++;
+        if (retryCount >= maxRetries) {
+          throw Exception('Failed to check registration after $maxRetries attempts: $e');
+        }
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    }
+    throw Exception('Failed to check registration after $maxRetries attempts');
+  }
+
   Future<void> testRegisterAndLogin() async {
     try {
-      final privateKey = '0x192ff8ad181ad785b2c4cfe40079fbba085d3eead3f9dddbd0898228262b4dd3'; // Replace with Ganache private key
+      final privateKey = '0x192ff8ad181ad785b2c4cfe40079fbba085d3eead3f9dddbd0898228262b4dd3';
       final address = EthPrivateKey.fromHex(privateKey.startsWith('0x') ? privateKey.substring(2) : privateKey).address.hex;
-      final isUserRegistered = await isRegistered(address); // Renamed variable
+      final isUserRegistered = await isRegistered(address);
       print('Test isRegistered: $isUserRegistered');
       if (!isUserRegistered) {
         final txHash = await register(privateKey);

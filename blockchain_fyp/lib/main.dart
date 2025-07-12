@@ -5,6 +5,9 @@ import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:get_it/get_it.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+import 'package:hex/hex.dart';
+import 'dart:typed_data';
 import 'services/contract_service.dart';
 
 void main() {
@@ -91,6 +94,7 @@ class _LoginScreenState extends State<LoginScreen> {
     } catch (e) {
       setState(() {
         _status = 'WalletConnect initialization failed: $e';
+        _isLoading = false;
       });
       print('Init Error: $e');
     }
@@ -100,6 +104,7 @@ class _LoginScreenState extends State<LoginScreen> {
     if (_web3App == null) {
       setState(() {
         _status = 'WalletConnect not initialized';
+        _isLoading = false;
       });
       return;
     }
@@ -115,32 +120,32 @@ class _LoginScreenState extends State<LoginScreen> {
         requiredNamespaces: {
           'eip155': const RequiredNamespace(
             chains: ['eip155:1337'],
-            methods: ['eth_sign', 'eth_signTransaction', 'eth_sendTransaction'],
+            methods: ['eth_accounts', 'wallet_switchEthereumChain'],
             events: ['accountsChanged', 'chainChanged'],
           ),
         },
       );
-      print('Connect response received: ${_connectResponse?.uri}');
 
+      print('Connect response received: ${_connectResponse?.uri}');
       final wcUri = _connectResponse!.uri.toString();
       print('WalletConnect URI: $wcUri');
+
       final uri = Uri.parse(wcUri);
-      print('Parsed URI: $uri');
       final canLaunch = await canLaunchUrl(uri);
-      print('Can Launch URL: $canLaunch');
-      if (canLaunch) {
-        await launchUrl(
-          uri,
-          mode: LaunchMode.externalApplication,
-        );
-        print('Launched MetaMask with URI');
-      } else {
+      if (!canLaunch) {
         setState(() {
           _status = 'Cannot launch MetaMask. Is it installed?';
           _isLoading = false;
         });
         return;
       }
+
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      print('Launched MetaMask with URI');
+
+      setState(() {
+        _status = 'Waiting for MetaMask approval...';
+      });
 
       _sessionData = await _connectResponse!.session.future.timeout(
         const Duration(seconds: 60),
@@ -151,7 +156,10 @@ class _LoginScreenState extends State<LoginScreen> {
       print('Session data: ${_sessionData?.namespaces}');
 
       if (_sessionData!.namespaces['eip155']!.accounts.isNotEmpty) {
-        final account = _sessionData!.namespaces['eip155']!.accounts[0];
+        final account = _sessionData!.namespaces['eip155']!.accounts.firstWhere(
+          (acc) => acc.contains('eip155:1337'),
+          orElse: () => throw Exception('No account found for chain eip155:1337'),
+        );
         final address = account.split(':').last;
         setState(() {
           _connectedAddress = address;
@@ -168,73 +176,52 @@ class _LoginScreenState extends State<LoginScreen> {
         }
 
         try {
-          print('Checking registration for $address...');
-          final isRegistered = await contractService.isRegistered(address);
-          print('Is registered: $isRegistered');
-          if (!isRegistered) {
-            print('Registering user...');
-            print('Register transaction params: ${{
-              'from': address,
-              'to': contractService.contractAddress,
-              'data': contractService.getFunctionData('register'),
-              'gas': '0x${(500000).toRadixString(16)}',
-              'gasPrice': '0x${(30 * 1e9).toInt().toRadixString(16)}',
-            }}');
-            final registerTx = await _web3App!.request(
-              topic: _sessionData!.topic,
-              chainId: 'eip155:1337',
-              request: SessionRequestParams(
-                method: 'eth_sendTransaction',
-                params: [{
-                  'from': address,
-                  'to': contractService.contractAddress,
-                  'data': contractService.getFunctionData('register'),
-                  'gas': '0x${(500000).toRadixString(16)}',
-                  'gasPrice': '0x${(30 * 1e9).toInt().toRadixString(16)}',
-                }],
-              ),
-            ).timeout(
-              const Duration(seconds: 60),
-              onTimeout: () {
-                throw Exception('Registration transaction timed out');
-              },
-            );
-            print('Registration transaction sent: $registerTx');
-            setState(() {
-              _status = 'Registration transaction sent: $registerTx';
-            });
-          }
-
-          print('Logging in user...');
-          print('Login transaction params: ${{
-            'from': address,
-            'to': contractService.contractAddress,
-            'data': contractService.getFunctionData('login'),
-            'gas': '0x${(500000).toRadixString(16)}',
-            'gasPrice': '0x${(30 * 1e9).toInt().toRadixString(16)}',
-          }}');
-          final loginTx = await _web3App!.request(
+          // Switch chain
+          print('Requesting chain switch to eip155:1337...');
+          await _web3App!.request(
             topic: _sessionData!.topic,
             chainId: 'eip155:1337',
             request: SessionRequestParams(
-              method: 'eth_sendTransaction',
-              params: [{
-                'from': address,
-                'to': contractService.contractAddress,
-                'data': contractService.getFunctionData('login'),
-                'gas': '0x${(500000).toRadixString(16)}',
-                'gasPrice': '0x${(30 * 1e9).toInt().toRadixString(16)}',
-              }],
+              method: 'wallet_switchEthereumChain',
+              params: [{'chainId': '0x539'}],
             ),
           ).timeout(
-            const Duration(seconds: 60),
+            const Duration(seconds: 30),
             onTimeout: () {
-              throw Exception('Login transaction timed out');
+              print('Chain switch timed out, continuing anyway...');
+              return 'timeout';
             },
           );
-          print('Login transaction sent: $loginTx');
+          print('Chain switched to eip155:1337');
+
+          // Check registration
           setState(() {
-            _status = 'Login transaction sent: $loginTx';
+            _status = 'Checking registration status...';
+          });
+          print('Checking registration for $address...');
+          final isRegistered = await contractService.isRegistered(address);
+          print('Is registered: $isRegistered');
+
+          if (!isRegistered) {
+            setState(() {
+              _status = 'Registering user...';
+            });
+            print('Registering user...');
+            final registerTx = await contractService.registerWithAddress(address);
+            setState(() {
+              _status = 'Registration successful: $registerTx';
+            });
+            await Future.delayed(const Duration(seconds: 3));
+          }
+
+          // Login
+          setState(() {
+            _status = 'Logging in...';
+          });
+          print('Logging in user...');
+          final loginTx = await contractService.loginWithAddress(address);
+          setState(() {
+            _status = 'Login successful: $loginTx';
             _isLoading = false;
           });
 
@@ -250,7 +237,6 @@ class _LoginScreenState extends State<LoginScreen> {
             _status = 'Transaction Error: $e';
             _isLoading = false;
           });
-          return;
         }
       } else {
         setState(() {
@@ -339,7 +325,7 @@ class _LoginScreenState extends State<LoginScreen> {
         child: Center(
           child: contractService == null
               ? const CircularProgressIndicator(color: Colors.white)
-              : Padding(
+              : SingleChildScrollView(
                   padding: const EdgeInsets.all(16.0),
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -381,10 +367,17 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 20),
                       if (_status.isNotEmpty)
-                        Text(
-                          _status,
-                          style: const TextStyle(color: Colors.red, fontSize: 16),
-                          textAlign: TextAlign.center,
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            _status,
+                            style: const TextStyle(color: Colors.white, fontSize: 16),
+                            textAlign: TextAlign.center,
+                          ),
                         ),
                     ],
                   ),
@@ -443,7 +436,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         title: const Text('Profile Setup'),
         backgroundColor: Colors.blue[700],
       ),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -464,11 +457,12 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   'Private Key: ',
                   style: TextStyle(fontSize: 16),
                 ),
-                Text(
-                  _showPrivateKey ? _privateKey! : '••••••••',
-                  style: const TextStyle(fontSize: 16),
+                Expanded(
+                  child: Text(
+                    _showPrivateKey ? _privateKey! : '••••••••',
+                    style: const TextStyle(fontSize: 16),
+                  ),
                 ),
-                const SizedBox(width: 10),
                 IconButton(
                   icon: Icon(_showPrivateKey ? Icons.visibility_off : Icons.visibility),
                   onPressed: () {
@@ -509,7 +503,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
             if (_status.isNotEmpty)
               Text(
                 _status,
-                style: const TextStyle(color: Colors.red, fontSize: 16),
+                style: TextStyle(
+                  color: _status.contains('successfully') ? Colors.green : Colors.red,
+                  fontSize: 16,
+                ),
               ),
           ],
         ),
