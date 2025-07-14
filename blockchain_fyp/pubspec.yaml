@@ -25,3 +25,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/contract_abi.json
+    - assets/logo.png
+    - assets/chat_illustration.png
+    - assets/ProfileIcon.png

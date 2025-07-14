@@ -1,3 +1,4 @@
+import 'package:blockchain_fyp/splash.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:web3dart/web3dart.dart';
@@ -9,11 +10,12 @@ import 'package:http/http.dart' as http;
 import 'package:hex/hex.dart';
 import 'dart:typed_data';
 import 'services/contract_service.dart';
+import 'ProfileSetup.dart';
 
 void main() {
   GetIt.I.registerSingletonAsync<Web3App>(() async {
     final app = await Web3App.createInstance(
-      projectId: '1f976613b40ddd232f1339e8ae5f1634',
+      projectId: '8b3a8acfa9a31912661157c7137ae314',
       metadata: const PairingMetadata(
         name: 'FYP Secure File Sharing',
         description: 'Blockchain-based file sharing app',
@@ -57,7 +59,7 @@ class MyApp extends StatelessWidget {
             ),
           ),
         ),
-        home: const LoginScreen(),
+        home: const SplashScreen(),
       ),
     );
   }
@@ -70,7 +72,8 @@ class LoginScreen extends StatefulWidget {
   _LoginScreenState createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> {
+class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin {
+
   String _status = '';
   bool _isLoading = false;
   String? _connectedAddress;
@@ -78,12 +81,28 @@ class _LoginScreenState extends State<LoginScreen> {
   Web3App? _web3App;
   ConnectResponse? _connectResponse;
   SessionData? _sessionData;
+  late final AnimationController _controller;
+  late final Animation<Offset> _pan;
 
   @override
   void initState() {
     super.initState();
+    
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    );
+    // screen slides from bottom (Offset 0,1) → centre
+    _pan = Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+    );
+    // start after first frame for smoothness
+    WidgetsBinding.instance.addPostFrameCallback((_) => _controller.forward());
     _initializeWalletConnect();
   }
+
+
+
 
   Future<void> _initializeWalletConnect() async {
     try {
@@ -311,209 +330,103 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final contractService = Provider.of<ContractService?>(context);
-
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Colors.blue[900]!, Colors.blue[300]!],
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
+      backgroundColor: const Color(0xFF00163A),
+      body: SafeArea(
+        child: SlideTransition(
+          position: _pan,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 32),
+                  const Text(
+                    'Secure\nMessaging app,\nbut made for\nteams.',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      height: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  // Right‑aligned illustration
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Image.asset(
+                      'assets/chat_illustration.png',
+                      height: 230,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  // White card box
+                  Padding(
+                    padding: const EdgeInsets.only(top: 50), // thoda neeche
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text('Get Started',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w600,
+                              )),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Join thousands of users who trust Ether Share for their private communication.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          const SizedBox(height: 20),
+                          FilledButton(
+                            onPressed: () {
+                              _connectToMetaMask();
+                            },
+                            style: FilledButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                            ),
+                            child: const Text('Continue with MetaMask 🦊'),
+                          ),
+                          const SizedBox(height: 12),
+                          OutlinedButton(
+                            onPressed: () {
+                              
+                            },
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                            ),
+                            child: const Text('Login with Private Key'),
+                          ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'By continuing, you agree to our Terms of Service and Privacy Policy',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 10, color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
-        child: Center(
-          child: contractService == null
-              ? const CircularProgressIndicator(color: Colors.white)
-              : SingleChildScrollView(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text(
-                        'FYP Secure File Sharing',
-                        style: TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      ElevatedButton(
-                        onPressed: _isLoading ? null : _connectToMetaMask,
-                        child: _isLoading
-                            ? const CircularProgressIndicator(color: Colors.white)
-                            : const Text('Connect to MetaMask'),
-                      ),
-                      const SizedBox(height: 20),
-                      TextField(
-                        decoration: const InputDecoration(
-                          labelText: 'Private Key',
-                          labelStyle: TextStyle(color: Colors.white),
-                          enabledBorder: OutlineInputBorder(
-                            borderSide: BorderSide(color: Colors.white),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderSide: BorderSide(color: Colors.white),
-                          ),
-                        ),
-                        style: const TextStyle(color: Colors.white),
-                        onChanged: (value) => _privateKey = value,
-                      ),
-                      const SizedBox(height: 20),
-                      ElevatedButton(
-                        onPressed: _isLoading ? null : _loginWithPrivateKey,
-                        child: const Text('Login with Private Key'),
-                      ),
-                      const SizedBox(height: 20),
-                      if (_status.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            _status,
-                            style: const TextStyle(color: Colors.white, fontSize: 16),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-        ),
       ),
     );
   }
 }
 
-class ProfileSetupScreen extends StatefulWidget {
-  final String address;
 
-  const ProfileSetupScreen({super.key, required this.address});
-
-  @override
-  _ProfileSetupScreenState createState() => _ProfileSetupScreenState();
-}
-
-class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
-  final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
-  bool _showPrivateKey = false;
-  String? _privateKey;
-  String _status = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _privateKey = 'Unable to fetch private key securely. Export from MetaMask.';
-  }
-
-  Future<void> _saveProfile() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('username', _usernameController.text.trim());
-      await prefs.setString('email', _emailController.text.trim());
-      setState(() {
-        _status = 'Profile saved successfully!';
-      });
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
-      );
-    } catch (e) {
-      setState(() {
-        _status = 'Error saving profile: $e';
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Profile Setup'),
-        backgroundColor: Colors.blue[700],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Account Details',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Address: ${widget.address}',
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                const Text(
-                  'Private Key: ',
-                  style: TextStyle(fontSize: 16),
-                ),
-                Expanded(
-                  child: Text(
-                    _showPrivateKey ? _privateKey! : '••••••••',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(_showPrivateKey ? Icons.visibility_off : Icons.visibility),
-                  onPressed: () {
-                    setState(() {
-                      _showPrivateKey = !_showPrivateKey;
-                    });
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'Profile Information',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _usernameController,
-              decoration: const InputDecoration(
-                labelText: 'Username',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _emailController,
-              decoration: const InputDecoration(
-                labelText: 'Email (Optional)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: _saveProfile,
-              child: const Text('Save Profile'),
-            ),
-            const SizedBox(height: 20),
-            if (_status.isNotEmpty)
-              Text(
-                _status,
-                style: TextStyle(
-                  color: _status.contains('successfully') ? Colors.green : Colors.red,
-                  fontSize: 16,
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
