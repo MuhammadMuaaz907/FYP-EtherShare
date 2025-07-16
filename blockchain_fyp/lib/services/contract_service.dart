@@ -5,8 +5,8 @@ import 'package:web3dart/web3dart.dart';
 import 'package:hex/hex.dart';
 
 class ContractService {
-  final String _rpcUrl = 'https://6b09d6ad84df.ngrok-free.app';
-  final String _contractAddress = '0xDe9c68e3eb21D46B67081C08460c6b5092776e1c';
+  final String _rpcUrl = 'https://d5cb1a8f7c27.ngrok-free.app';
+  final String _contractAddress = '0xa8FD94cD7f4Ee4513E938106911E56770d73CCf1';
   late Web3Client _client;
   late DeployedContract _contract;
   late ContractFunction _register;
@@ -36,7 +36,7 @@ class ContractService {
       _register = _contract.function('register');
       _login = _contract.function('login');
       _isRegistered = _contract.function('isRegistered');
-      await testRegisterAndLogin();
+      // await testRegisterAndLogin();
     } catch (e) {
       print('ContractService init error: $e');
       rethrow;
@@ -101,7 +101,7 @@ class ContractService {
     try {
       final nonce = await _client.getTransactionCount(EthereumAddress.fromHex(address));
       final txHash = await _client.sendTransaction(
-        EthPrivateKey.fromHex('0xd8916005f7060b1ad1bdd0cce817a4355b522a0419d1d017009c07be91a25cd0'),
+        EthPrivateKey.fromHex('0x192ff8ad181ad785b2c4cfe40079fbba085d3eead3f9dddbd0898228262b4dd3'),
         Transaction.callContract(
           contract: _contract,
           function: _register,
@@ -123,7 +123,7 @@ class ContractService {
     try {
       final nonce = await _client.getTransactionCount(EthereumAddress.fromHex(address));
       final txHash = await _client.sendTransaction(
-        EthPrivateKey.fromHex('0xd8916005f7060b1ad1bdd0cce817a4355b522a0419d1d017009c07be91a25cd0'),
+        EthPrivateKey.fromHex('0x192ff8ad181ad785b2c4cfe40079fbba085d3eead3f9dddbd0898228262b4dd3'),
         Transaction.callContract(
           contract: _contract,
           function: _login,
@@ -168,7 +168,7 @@ class ContractService {
 
   Future<void> testRegisterAndLogin() async {
     try {
-      final privateKey = '0xd8916005f7060b1ad1bdd0cce817a4355b522a0419d1d017009c07be91a25cd0';
+      final privateKey = '0x192ff8ad181ad785b2c4cfe40079fbba085d3eead3f9dddbd0898228262b4dd3';
       final address = EthPrivateKey.fromHex(privateKey.startsWith('0x') ? privateKey.substring(2) : privateKey).address.hex;
       final isUserRegistered = await isRegistered(address);
       print('Test isRegistered: $isUserRegistered');
