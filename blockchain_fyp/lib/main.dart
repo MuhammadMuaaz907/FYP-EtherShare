@@ -53,6 +53,7 @@ class MyApp extends StatelessWidget {
       initialData: null,
       child: MaterialApp(
         title: 'FYP - Secure File Sharing',
+        debugShowCheckedModeBanner: false,
         theme: ThemeData(
           primarySwatch: Colors.blue,
           useMaterial3: true,

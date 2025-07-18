@@ -4,6 +4,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:get_it/get_it.dart';
 import 'services/ipfs_service.dart';
 import 'services/orbitdb_service.dart';
+import 'package:dio/dio.dart';
+import 'package:open_file/open_file.dart';
+import 'package:path_provider/path_provider.dart';
 
 class ChannelPage extends StatefulWidget {
   final String channelName;
@@ -82,6 +85,33 @@ class _ChannelPageState extends State<ChannelPage> {
         });
       });
       _messageController.clear();
+    }
+  }
+
+  Future<void> downloadAndOpenFile(String cid, String fileName) async {
+    try {
+      setState(() {
+        status = 'Downloading file...';
+      });
+      // Use a public IPFS gateway or your own node
+      final url = 'https://ipfs.io/ipfs/$cid';
+      final dir = await getTemporaryDirectory();
+      final filePath = '${dir.path}/$fileName';
+
+      final dio = Dio();
+      await dio.download(url, filePath);
+
+      setState(() {
+        status = 'File downloaded. Opening...';
+      });
+      await OpenFile.open(filePath);
+      setState(() {
+        status = '';
+      });
+    } catch (e) {
+      setState(() {
+        status = 'Error downloading/opening file: $e';
+      });
     }
   }
 
@@ -319,7 +349,7 @@ class _ChannelPageState extends State<ChannelPage> {
                         IconButton(
                           icon: const Icon(Icons.download, color: Color(0xFF4F0E5E)),
                           onPressed: () {
-                            // TODO: Implement file download
+                            downloadAndOpenFile(message['cid'], message['fileName']);
                           },
                         ),
                       ],

@@ -2,7 +2,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 
 class OrbitDBService {
-  final String serverUrl = 'http://192.168.0.35:3000';
+  final String serverUrl = 'http://192.168.0.36:3000';
 
   Future<String> createDatabase(String dbName, {String dbType = 'keyvalue'}) async {
     try {

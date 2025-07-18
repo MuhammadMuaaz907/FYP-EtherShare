@@ -5,7 +5,7 @@ import 'package:web3dart/web3dart.dart';
 import 'package:hex/hex.dart';
 
 class ContractService {
-  final String _rpcUrl = 'https://d5cb1a8f7c27.ngrok-free.app';
+  final String _rpcUrl = 'https://0c928a3e03aa.ngrok-free.app';
   final String _contractAddress = '0xa8FD94cD7f4Ee4513E938106911E56770d73CCf1';
   late Web3Client _client;
   late DeployedContract _contract;
