@@ -1,5 +1,22 @@
 {
-  "dependencies": {
-    "web3": "^4.16.0"
-  }
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "helia": "^5.4.2",
+    "nodemon": "^3.1.10",
+    "web3": "^4.16.0"
+  },
+  "name": "fyp-ethershare",
+  "version": "1.0.0",
+  "main": "mobile_test.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
 }

@@ -13,8 +13,13 @@ import 'services/contract_service.dart';
 import 'ProfileSetup.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
+import 'services/ipfs_service.dart';
+import 'services/orbitdb_service.dart';
 
 void main() {
+  GetIt.I.registerSingleton<IPFSService>(IPFSService());
+  GetIt.I.registerSingleton<OrbitDBService>(OrbitDBService());
+  
   GetIt.I.registerSingletonAsync<Web3App>(() async {
     final app = await Web3App.createInstance(
       projectId: '1f976613b40ddd232f1339e8ae5f1634',

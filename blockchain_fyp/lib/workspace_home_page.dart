@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
+import 'channel_page.dart';
 
-class TeamHomePage extends StatelessWidget {
+class TeamHomePage extends StatefulWidget {
   final String workspaceName;
   final String channelName;
   const TeamHomePage({super.key, required this.workspaceName, required this.channelName});
 
+  @override
+  State<TeamHomePage> createState() => _TeamHomePageState();
+}
+
+class _TeamHomePageState extends State<TeamHomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -37,7 +43,7 @@ class TeamHomePage extends StatelessWidget {
                       ),
                       const SizedBox(width: 10),
                       Text(
-                        workspaceName.isNotEmpty ? workspaceName : 'OnlineWork',
+                        widget.workspaceName.isNotEmpty ? widget.workspaceName : 'OnlineWork',
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
@@ -117,7 +123,7 @@ class TeamHomePage extends StatelessWidget {
           ),
           _channelTile('# general'),
           _channelTile('# random'),
-          _channelTile('# ${channelName.isNotEmpty ? channelName : 'work'}', trailing: _startHere()),
+          _channelTile('# ${widget.channelName.isNotEmpty ? widget.channelName : 'work'}', trailing: _startHere()),
           _addChannelTile(),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -177,7 +183,18 @@ class TeamHomePage extends StatelessWidget {
               child: trailing,
             )
           : null,
-      onTap: () {},
+      onTap: () {
+        final channel = name.replaceAll('#', '').trim();
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ChannelPage(
+              channelName: channel,
+              workspaceName: widget.workspaceName,
+            ),
+          ),
+        );
+      },
     );
   }
 
