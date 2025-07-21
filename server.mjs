@@ -16,6 +16,14 @@ app.use(express.json());
 const databases = new Map();
 const dataStore = new Map();
 
+// Add the known workspace DB address at startup so it always exists
+const defaultWorkspaceDbAddress = 'orbitdb://1753005090106-9uj7iwhel'.toLowerCase().trim();
+databases.set(defaultWorkspaceDbAddress, {
+  name: 'workspaces',
+  type: 'keyvalue',
+  createdAt: new Date().toISOString()
+});
+
 // Create a simple database
 app.post('/create-db', async (req, res) => {
   try {
@@ -47,7 +55,9 @@ app.post('/create-db', async (req, res) => {
 // Add data to database
 app.post('/add-data', async (req, res) => {
   try {
-    const { dbAddress, key, value } = req.body;
+    let { dbAddress, key, value } = req.body;
+    dbAddress = dbAddress.toLowerCase().trim();
+    key = key.toLowerCase().trim();
     
     if (!dbAddress || !key) {
       return res.status(400).json({ error: 'dbAddress and key are required' });
@@ -77,8 +87,11 @@ app.post('/add-data', async (req, res) => {
 // Get data from database
 app.get('/get-data/:dbAddress/:key', async (req, res) => {
   try {
-    const { dbAddress, key } = req.params;
-    
+    let dbAddress = Buffer.from(req.params.dbAddress, 'base64').toString('utf8');
+    let key = Buffer.from(req.params.key, 'base64').toString('utf8');
+    dbAddress = dbAddress.toLowerCase().trim();
+    key = key.toLowerCase().trim();
+
     if (!dbAddress || !key) {
       return res.status(400).json({ error: 'dbAddress and key are required' });
     }

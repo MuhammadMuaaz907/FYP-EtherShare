@@ -3,7 +3,8 @@ import 'workspace_preview_page.dart';
 
 class ProjectNamePage extends StatefulWidget {
   final String workspaceName;
-  const ProjectNamePage({super.key, required this.workspaceName});
+  final String userAddress;
+  const ProjectNamePage({super.key, required this.workspaceName, required this.userAddress});
 
   @override
   State<ProjectNamePage> createState() => _ProjectNamePageState();
@@ -107,6 +108,7 @@ class _ProjectNamePageState extends State<ProjectNamePage> {
                                 builder: (_) => ChannelPreviewPage(
                                   workspaceName: widget.workspaceName,
                                   channelName: _controller.text.trim(),
+                                  userAddress: widget.userAddress,
                                 ),
                               ),
                             );

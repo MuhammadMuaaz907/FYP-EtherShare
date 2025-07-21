@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'services/contract_service.dart';
+import 'services/orbitdb_service.dart';
 import 'ProfileSetup.dart';
 import 'package:web3dart/web3dart.dart';
+import 'workspace_home_page.dart';
+import 'dart:convert'; // Added for jsonDecode
 
 class PrivateKeyLoginScreen extends StatefulWidget {
   const PrivateKeyLoginScreen({super.key});
@@ -39,6 +42,39 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
       final credentials = EthPrivateKey.fromHex(_privateKey.startsWith('0x') ? _privateKey.substring(2) : _privateKey);
       final address = credentials.address.hex;
       final isRegistered = await contractService.isRegistered(address);
+      final workspaceExists = await contractService.doesWorkspaceExist(address);
+      if (isRegistered && workspaceExists) {
+        setState(() {
+          _status = 'Login successful! Redirecting to workspace...';
+          _isLoading = false;
+        });
+        if (mounted) {
+          // Fetch workspace details from OrbitDB
+          final orbitdb = OrbitDBService();
+          final workspaceJson = await orbitdb.getData(OrbitDBService.workspaceDbAddress, address);
+          String workspaceName = 'YourWorkspace';
+          String channelName = 'general';
+          if (workspaceJson.isNotEmpty) {
+            try {
+              final workspaceDetails = jsonDecode(workspaceJson);
+              workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
+              channelName = workspaceDetails['channelName'] ?? channelName;
+            } catch (e) {
+              print('Error decoding workspace details: $e');
+            }
+          }
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => TeamHomePage(
+                workspaceName: workspaceName,
+                channelName: channelName,
+              ),
+            ),
+          );
+        }
+        return;
+      }
       if (!isRegistered) {
         await contractService.register(_privateKey);
       }

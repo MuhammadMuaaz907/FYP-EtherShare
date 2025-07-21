@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'channel_page.dart';
+import 'login_screen.dart';
 
 class TeamHomePage extends StatefulWidget {
   final String workspaceName;
@@ -32,14 +33,24 @@ class _TeamHomePageState extends State<TeamHomePage> {
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: Row(
                     children: [
-                      Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(8),
+                      GestureDetector(
+                        onTap: () {
+                          showModalBottomSheet(
+                            context: context,
+                            isScrollControlled: true,
+                            backgroundColor: Colors.transparent,
+                            builder: (context) => const WorkspaceDrawer(),
+                          );
+                        },
+                        child: Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(Icons.circle, color: Colors.white, size: 20),
                         ),
-                        child: const Icon(Icons.circle, color: Colors.white, size: 20),
                       ),
                       const SizedBox(width: 10),
                       Text(
@@ -241,4 +252,89 @@ class _TeamHomePageState extends State<TeamHomePage> {
       ),
     );
   }
-} 
+}
+
+class WorkspaceDrawer extends StatelessWidget {
+  const WorkspaceDrawer({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: FractionallySizedBox(
+        widthFactor: 0.8,
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF232B3E),
+            borderRadius: BorderRadius.only(
+              topRight: Radius.circular(24),
+              bottomRight: Radius.circular(24),
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[800],
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Center(
+                      child: Text(
+                        'E',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 28,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      Text('Ethershare', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20)),
+                      Text('ethershare.slack.com', style: TextStyle(color: Colors.white54, fontSize: 14)),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 30),
+              ListTile(
+                leading: const Icon(Icons.add, color: Colors.white54),
+                title: const Text('Add a workspace', style: TextStyle(color: Colors.white, fontSize: 16)),
+                onTap: () {},
+                contentPadding: EdgeInsets.zero,
+              ),
+              ListTile(
+                leading: const Icon(Icons.settings, color: Colors.white54),
+                title: const Text('Preferences', style: TextStyle(color: Colors.white, fontSize: 16)),
+                onTap: () {},
+                contentPadding: EdgeInsets.zero,
+              ),
+              const Spacer(),
+              ListTile(
+                leading: const Icon(Icons.logout, color: Colors.redAccent),
+                title: const Text('Logout', style: TextStyle(color: Colors.redAccent, fontSize: 16)),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  Navigator.of(context).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (context) => const LoginScreen()),
+                    (route) => false,
+                  );
+                },
+                contentPadding: EdgeInsets.zero,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

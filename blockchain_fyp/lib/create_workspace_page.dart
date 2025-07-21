@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'workspace_name_page.dart';
 
 class CreateWorkspacePage extends StatelessWidget {
-  const CreateWorkspacePage({super.key});
+  final String userAddress;
+  const CreateWorkspacePage({super.key, required this.userAddress});
 
   @override
   Widget build(BuildContext context) {
@@ -59,7 +60,7 @@ class CreateWorkspacePage extends StatelessWidget {
                   onPressed: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const WorkspaceNamePage()),
+                      MaterialPageRoute(builder: (_) => WorkspaceNamePage(userAddress: userAddress)),
                     );
                   },
                   style: ElevatedButton.styleFrom(

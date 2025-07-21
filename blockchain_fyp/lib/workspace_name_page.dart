@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'invite_teammates_page.dart';
 
 class WorkspaceNamePage extends StatefulWidget {
-  const WorkspaceNamePage({super.key});
+  final String userAddress;
+  const WorkspaceNamePage({super.key, required this.userAddress});
 
   @override
   State<WorkspaceNamePage> createState() => _WorkspaceNamePageState();
@@ -90,6 +91,7 @@ class _WorkspaceNamePageState extends State<WorkspaceNamePage> {
                               MaterialPageRoute(
                                 builder: (_) => InviteTeammatesPage(
                                   workspaceName: _controller.text.trim(),
+                                  userAddress: widget.userAddress,
                                 ),
                               ),
                             );

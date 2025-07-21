@@ -3,9 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart';
 import 'package:web3dart/web3dart.dart';
 import 'package:hex/hex.dart';
+import './orbitdb_service.dart';
 
 class ContractService {
-  final String _rpcUrl = 'https://0c928a3e03aa.ngrok-free.app';
+  final String _rpcUrl = 'https://f6a37c61419b.ngrok-free.app';
   final String _contractAddress = '0xa8FD94cD7f4Ee4513E938106911E56770d73CCf1';
   late Web3Client _client;
   late DeployedContract _contract;
@@ -164,6 +165,22 @@ class ContractService {
       }
     }
     throw Exception('Failed to check registration after $maxRetries attempts');
+  }
+
+  // workspaceDbAddress is now set to the actual OrbitDB address in OrbitDBService.
+
+  Future<bool> doesWorkspaceExist(String address) async {
+    final orbitdb = OrbitDBService();
+    await orbitdb.ensureWorkspaceDbExists();
+    try {
+      final key = address.toLowerCase().trim();
+      final value = await orbitdb.getData(OrbitDBService.workspaceDbAddress, key);
+      print('Checking workspace for key: $key, value: $value');
+      return value.isNotEmpty;
+    } catch (e) {
+      print('Error checking workspace existence: $e');
+      return false;
+    }
   }
 
   Future<void> testRegisterAndLogin() async {

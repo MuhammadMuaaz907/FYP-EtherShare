@@ -4,7 +4,8 @@ import 'project_name_page.dart';
 
 class InviteTeammatesPage extends StatelessWidget {
   final String workspaceName;
-  const InviteTeammatesPage({super.key, required this.workspaceName});
+  final String userAddress;
+  const InviteTeammatesPage({super.key, required this.workspaceName, required this.userAddress});
 
   @override
   Widget build(BuildContext context) {
@@ -19,7 +20,7 @@ class InviteTeammatesPage extends StatelessWidget {
             onPressed: () {
                Navigator.pushReplacement(
                 context,
-                MaterialPageRoute(builder: (_) => ProjectNamePage(workspaceName: workspaceName)),
+                MaterialPageRoute(builder: (_) => ProjectNamePage(workspaceName: workspaceName, userAddress: userAddress)),
               );
             },
             child: const Text('SKIP', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w600)),

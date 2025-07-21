@@ -6,7 +6,10 @@ import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'ProfileSetup.dart';
 import 'services/contract_service.dart';
+import 'services/orbitdb_service.dart';
 import 'private_key_login_screen.dart';
+import 'workspace_home_page.dart';
+import 'dart:convert'; // Added for jsonDecode
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -112,6 +115,39 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               _status = 'Checking registration status...';
             });
             final isRegistered = await contractService.isRegistered(address);
+            final workspaceExists = await contractService.doesWorkspaceExist(address);
+            if (isRegistered && workspaceExists) {
+              setState(() {
+                _status = 'Login successful! Redirecting to workspace...';
+                _isLoading = false;
+              });
+              if (mounted) {
+                // Fetch workspace details from OrbitDB
+                final orbitdb = OrbitDBService();
+                final workspaceJson = await orbitdb.getData(OrbitDBService.workspaceDbAddress, address);
+                String workspaceName = 'YourWorkspace';
+                String channelName = 'general';
+                if (workspaceJson.isNotEmpty) {
+                  try {
+                    final workspaceDetails = jsonDecode(workspaceJson);
+                    workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
+                    channelName = workspaceDetails['channelName'] ?? channelName;
+                  } catch (e) {
+                    print('Error decoding workspace details: $e');
+                  }
+                }
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => TeamHomePage(
+                      workspaceName: workspaceName,
+                      channelName: channelName,
+                    ),
+                  ),
+                );
+              }
+              return;
+            }
             if (!isRegistered) {
               setState(() {
                 _status = 'Registering user...';

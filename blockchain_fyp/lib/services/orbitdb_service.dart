@@ -2,7 +2,29 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 
 class OrbitDBService {
-  final String serverUrl = 'http://192.168.0.36:3000';
+  final String serverUrl = 'http://192.168.0.35:3000';
+
+  // Shared workspace DB address (replace with your actual address after first creation)
+  static const String workspaceDbName = 'workspaces';
+  static String workspaceDbAddress = 'orbitdb://1753005090106-9uj7iwhel';
+
+  // Helper to create the shared workspace DB (call once, then save the address)
+  Future<void> ensureWorkspaceDbExists() async {
+    if (workspaceDbAddress == 'workspaces-db-address') {
+      final address = await createDatabase(workspaceDbName);
+      if (address.isNotEmpty) {
+        workspaceDbAddress = address;
+      }
+    }
+  }
+
+  // Helper to save workspace details for a user
+  Future<bool> saveWorkspaceForUser(String userAddress, String workspaceDetails) async {
+    await ensureWorkspaceDbExists();
+    final key = userAddress.toLowerCase().trim();
+    print('Saving workspace for key: $key, value: $workspaceDetails');
+    return addData(workspaceDbAddress, key, workspaceDetails);
+  }
 
   Future<String> createDatabase(String dbName, {String dbType = 'keyvalue'}) async {
     try {
@@ -36,9 +58,17 @@ class OrbitDBService {
 
   Future<String> getData(String dbAddress, String key) async {
     try {
-      var response = await http.get(Uri.parse('$serverUrl/get-data/$dbAddress/$key'));
-      var jsonResponse = jsonDecode(response.body);
-      return jsonResponse['value'];
+      var encodedDbAddress = base64.encode(utf8.encode(dbAddress));
+      var encodedKey = base64.encode(utf8.encode(key));
+      var response = await http.get(Uri.parse('$serverUrl/get-data/$encodedDbAddress/$encodedKey'));
+      print('OrbitDB GET response: ${response.statusCode} ${response.body}');
+      if (response.statusCode == 200) {
+        var jsonResponse = jsonDecode(response.body);
+        return jsonResponse['value'];
+      } else {
+        print('Error getting data: ${response.body}');
+        return '';
+      }
     } catch (e) {
       print('Error getting data: $e');
       return '';

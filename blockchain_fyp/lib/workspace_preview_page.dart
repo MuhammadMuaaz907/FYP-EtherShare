@@ -1,10 +1,17 @@
 import 'package:flutter/material.dart';
 import 'workspace_home_page.dart';
+import 'services/orbitdb_service.dart';
+import 'dart:convert';
 
 class ChannelPreviewPage extends StatelessWidget {
   final String workspaceName;
   final String channelName;
-  const ChannelPreviewPage({super.key, required this.workspaceName, required this.channelName});
+  final String userAddress;
+  const ChannelPreviewPage(
+      {super.key,
+      required this.workspaceName,
+      required this.channelName,
+      required this.userAddress});
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +71,8 @@ class ChannelPreviewPage extends StatelessWidget {
                           children: [
                             const Padding(
                               padding: EdgeInsets.only(left: 16),
-                              child: Text('1:32', style: TextStyle(fontSize: 14)),
+                              child:
+                                  Text('1:32', style: TextStyle(fontSize: 14)),
                             ),
                             const SizedBox(width: 8),
                             const Icon(Icons.tag, size: 16),
@@ -87,16 +95,25 @@ class ChannelPreviewPage extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 // Messages
-                                _buildMessage('Hey team! How\'s the project going?', Colors.yellow),
+                                _buildMessage(
+                                    'Hey team! How\'s the project going?',
+                                    Colors.yellow),
                                 _buildReactions(),
                                 const SizedBox(height: 8),
-                                _buildMessage('Great progress on the frontend!', Colors.pink),
-                                _buildMessage('Backend API is almost ready', Colors.green),
-                                _buildMessage('Design review scheduled for tomorrow', Colors.grey),
-                                _buildMessage('Meeting notes from today\'s standup', Colors.lightBlue),
+                                _buildMessage('Great progress on the frontend!',
+                                    Colors.pink),
+                                _buildMessage('Backend API is almost ready',
+                                    Colors.green),
+                                _buildMessage(
+                                    'Design review scheduled for tomorrow',
+                                    Colors.grey),
+                                _buildMessage(
+                                    'Meeting notes from today\'s standup',
+                                    Colors.lightBlue),
                                 _buildAttachment(),
                                 const SizedBox(height: 8),
-                                _buildMessage('Thanks everyone!', Colors.yellow),
+                                _buildMessage(
+                                    'Thanks everyone!', Colors.yellow),
                               ],
                             ),
                           ),
@@ -147,7 +164,17 @@ class ChannelPreviewPage extends StatelessWidget {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: () {
+                    onPressed: () async {
+                      // Save workspace for user in OrbitDB
+                      final orbitdb = OrbitDBService();
+                      final key = userAddress.toLowerCase().trim();
+                      final workspaceDetails = jsonEncode({
+                        'workspaceName': workspaceName,
+                        'channelName': channelName,
+                      });
+                      print(
+                          'Saving workspace for key: $key, value: $workspaceDetails');
+                      await orbitdb.saveWorkspaceForUser(key, workspaceDetails);
                       Navigator.push(
                         context,
                         MaterialPageRoute(
@@ -162,8 +189,10 @@ class ChannelPreviewPage extends StatelessWidget {
                       backgroundColor: const Color(0xFF23C16B),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 16),
-                      textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      textStyle: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10)),
                     ),
                     child: const Text('See your channel in EtherShare'),
                   ),
@@ -238,7 +267,8 @@ class ChannelPreviewPage extends StatelessWidget {
           Icon(icon, size: 12, color: Colors.grey[600]),
           if (count.isNotEmpty) ...[
             const SizedBox(width: 2),
-            Text(count, style: TextStyle(fontSize: 10, color: Colors.grey[600])),
+            Text(count,
+                style: TextStyle(fontSize: 10, color: Colors.grey[600])),
           ],
         ],
       ),
@@ -271,4 +301,4 @@ class ChannelPreviewPage extends StatelessWidget {
       ),
     );
   }
-} 
+}

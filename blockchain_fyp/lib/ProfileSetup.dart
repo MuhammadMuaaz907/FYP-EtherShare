@@ -37,7 +37,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       });
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => const CreateWorkspacePage()),
+        MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.address)),
       );
     } catch (e) {
       setState(() {
