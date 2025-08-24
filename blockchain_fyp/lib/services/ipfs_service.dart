@@ -3,7 +3,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 
 class IPFSService {
-  final String ipfsApiUrl = 'http://192.168.0.35:5001/api/v0';
+  final String ipfsApiUrl = 'http://192.168.0.37:5001/api/v0';
 
   Future<String> uploadFileToIPFS(File file) async {
     try {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'workspace_home_page.dart';
 import 'services/orbitdb_service.dart';
 import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ChannelPreviewPage extends StatelessWidget {
   final String workspaceName;
@@ -175,6 +176,10 @@ class ChannelPreviewPage extends StatelessWidget {
                       print(
                           'Saving workspace for key: $key, value: $workspaceDetails');
                       await orbitdb.saveWorkspaceForUser(key, workspaceDetails);
+                      // Save workspaceName and channelName to SharedPreferences for auto-login
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.setString('workspaceName', workspaceName);
+                      await prefs.setString('channelName', channelName);
                       Navigator.push(
                         context,
                         MaterialPageRoute(
