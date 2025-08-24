@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'channel_page.dart';
 import 'login_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 
 class TeamHomePage extends StatefulWidget {
   final String workspaceName;
@@ -12,9 +14,47 @@ class TeamHomePage extends StatefulWidget {
 }
 
 class _TeamHomePageState extends State<TeamHomePage> {
+  String currentUserName = 'You';
+  DateTime? _lastBackPressTime;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserName();
+  }
+
+  Future<void> _loadUserName() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        currentUserName = prefs.getString('username') ?? 'You';
+      });
+    } catch (_) {
+      setState(() {
+        currentUserName = 'You';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return WillPopScope(
+      onWillPop: () async {
+        DateTime now = DateTime.now();
+        if (_lastBackPressTime == null || now.difference(_lastBackPressTime!) > Duration(seconds: 2)) {
+          _lastBackPressTime = now;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('If you want to exit please back once again'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+          return false;
+        }
+        await SystemNavigator.pop();
+        return false;
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFF1A2236),
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(110),
@@ -42,14 +82,19 @@ class _TeamHomePageState extends State<TeamHomePage> {
                             builder: (context) => const WorkspaceDrawer(),
                           );
                         },
-                        child: Container(
-                          width: 32,
-                          height: 32,
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(8),
+                        child: CircleAvatar(
+                          backgroundColor: Colors.black.withOpacity(0.2),
+                          radius: 16,
+                          child: Text(
+                            (widget.workspaceName.isNotEmpty
+                                    ? widget.workspaceName[0].toUpperCase()
+                                    : 'W'),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                            ),
                           ),
-                          child: const Icon(Icons.circle, color: Colors.white, size: 20),
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -132,15 +177,15 @@ class _TeamHomePageState extends State<TeamHomePage> {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: const Text('Channels', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           ),
-          _channelTile('# general'),
-          _channelTile('# random'),
-          _channelTile('# ${widget.channelName.isNotEmpty ? widget.channelName : 'work'}', trailing: _startHere()),
+          _channelTile('General'),
+          _channelTile('Random'),
+          _channelTile('${widget.channelName.isNotEmpty ? widget.channelName : 'work'}', trailing: _startHere()),
           _addChannelTile(),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: const Text('Direct messages', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           ),
-          _dmTile('onlinework3517 (you)'),
+          _dmTile('$currentUserName (you)'),
           _addTeammatesTile(),
         ],
       ),
@@ -163,7 +208,8 @@ class _TeamHomePageState extends State<TeamHomePage> {
         currentIndex: 0,
         onTap: (i) {},
       ),
-    );
+    ),
+  );
   }
 
   Widget _quickAction(IconData icon, String label) {
@@ -218,10 +264,25 @@ class _TeamHomePageState extends State<TeamHomePage> {
   }
 
   Widget _dmTile(String name) {
+    String initial = 'U';
+    if (name.isNotEmpty) {
+      // Remove (you) if present, and trim
+      String baseName = name.replaceAll('(you)', '').trim();
+      if (baseName.isNotEmpty) {
+        initial = baseName[0].toUpperCase();
+      }
+    }
     return ListTile(
-      leading: const CircleAvatar(
+      leading: CircleAvatar(
         backgroundColor: Colors.white,
-        child: Icon(Icons.person, color: Color(0xFF4F0E5E)),
+        child: Text(
+          initial,
+          style: const TextStyle(
+            color: Color(0xFF4F0E5E),
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+          ),
+        ),
       ),
       title: Text(name, style: const TextStyle(color: Colors.white, fontSize: 16)),
       onTap: () {},
@@ -322,7 +383,9 @@ class WorkspaceDrawer extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.logout, color: Colors.redAccent),
                 title: const Text('Logout', style: TextStyle(color: Colors.redAccent, fontSize: 16)),
-                onTap: () {
+                onTap: () async {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.clear();
                   Navigator.of(context).pop();
                   Navigator.of(context).pushAndRemoveUntil(
                     MaterialPageRoute(builder: (context) => const LoginScreen()),

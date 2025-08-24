@@ -2,7 +2,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 
 class OrbitDBService {
-  final String serverUrl = 'http://192.168.0.35:3000';
+  final String serverUrl = 'http://192.168.0.37:3000';
 
   // Shared workspace DB address (replace with your actual address after first creation)
   static const String workspaceDbName = 'workspaces';
@@ -73,5 +73,39 @@ class OrbitDBService {
       print('Error getting data: $e');
       return '';
     }
+  }
+
+  // Store a message in a channel (append to list)
+  Future<bool> addChannelMessage(String workspace, String channel, Map<String, dynamic> message) async {
+    final dbAddress = workspaceDbAddress;
+    final key = 'messages-${workspace}-${channel}';
+    // Get current messages
+    String current = await getData(dbAddress, key);
+    List<dynamic> messages = [];
+    if (current.isNotEmpty) {
+      try {
+        messages = jsonDecode(current);
+      } catch (_) {
+        messages = [];
+      }
+    }
+    messages.add(message);
+    return addData(dbAddress, key, jsonEncode(messages));
+  }
+
+  // Retrieve all messages for a channel
+  Future<List<Map<String, dynamic>>> getChannelMessages(String workspace, String channel) async {
+    final dbAddress = workspaceDbAddress;
+    final key = 'messages-${workspace}-${channel}';
+    String data = await getData(dbAddress, key);
+    if (data.isNotEmpty) {
+      try {
+        List<dynamic> decoded = jsonDecode(data);
+        return decoded.cast<Map<String, dynamic>>();
+      } catch (_) {
+        return [];
+      }
+    }
+    return [];
   }
 }

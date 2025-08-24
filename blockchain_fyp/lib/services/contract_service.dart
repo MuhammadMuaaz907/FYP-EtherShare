@@ -6,7 +6,7 @@ import 'package:hex/hex.dart';
 import './orbitdb_service.dart';
 
 class ContractService {
-  final String _rpcUrl = 'https://f6a37c61419b.ngrok-free.app';
+  final String _rpcUrl = 'https://c364f5736623.ngrok-free.app';
   final String _contractAddress = '0xa8FD94cD7f4Ee4513E938106911E56770d73CCf1';
   late Web3Client _client;
   late DeployedContract _contract;

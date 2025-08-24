@@ -7,6 +7,7 @@ import 'services/orbitdb_service.dart';
 import 'package:dio/dio.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ChannelPage extends StatefulWidget {
   final String channelName;
@@ -24,6 +25,38 @@ class _ChannelPageState extends State<ChannelPage> {
   String status = '';
   final TextEditingController _messageController = TextEditingController();
   final List<Map<String, dynamic>> _messages = [];
+  String currentUserName = 'User';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserNameAndMessages();
+  }
+
+  Future<void> _loadUserNameAndMessages() async {
+    // Load user name from SharedPreferences
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      currentUserName = prefs.getString('username') ?? 'User';
+    } catch (_) {
+      currentUserName = 'User';
+    }
+    await _loadMessages();
+  }
+
+  Future<void> _loadMessages() async {
+    List<Map<String, dynamic>> loaded = await orbitDBService.getChannelMessages(widget.workspaceName, widget.channelName);
+    // Parse timestamps back to DateTime
+    for (var msg in loaded) {
+      if (msg['timestamp'] is String) {
+        msg['timestamp'] = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
+      }
+    }
+    setState(() {
+      _messages.clear();
+      _messages.addAll(loaded);
+    });
+  }
 
   Future<void> uploadFile() async {
     try {
@@ -40,19 +73,25 @@ class _ChannelPageState extends State<ChannelPage> {
           String dbAddress = await orbitDBService.createDatabase('file-metadata-${DateTime.now().millisecondsSinceEpoch}');
           // Store CID in OrbitDB
           bool success = await orbitDBService.addData(dbAddress, 'file-cid', cid);
-          
+
           if (success) {
-            // Add file message to the channel
+            final msg = {
+              'type': 'file',
+              'content': 'File uploaded! CID: $cid',
+              'timestamp': DateTime.now().toIso8601String(),
+              'fileName': result.files.single.name,
+              'cid': cid,
+              'senderName': currentUserName,
+            };
             setState(() {
               _messages.add({
-                'type': 'file',
-                'content': 'File uploaded! CID: $cid',
+                ...msg,
                 'timestamp': DateTime.now(),
-                'fileName': result.files.single.name,
-                'cid': cid,
               });
               status = 'File uploaded successfully!';
             });
+            // Save to OrbitDB
+            await orbitDBService.addChannelMessage(widget.workspaceName, widget.channelName, msg);
           } else {
             setState(() {
               status = 'Failed to store in OrbitDB';
@@ -75,16 +114,23 @@ class _ChannelPageState extends State<ChannelPage> {
     }
   }
 
-  void _sendMessage() {
+  void _sendMessage() async {
     if (_messageController.text.trim().isNotEmpty) {
+      final msg = {
+        'type': 'text',
+        'content': _messageController.text.trim(),
+        'timestamp': DateTime.now().toIso8601String(),
+        'senderName': currentUserName,
+      };
       setState(() {
         _messages.add({
-          'type': 'text',
-          'content': _messageController.text.trim(),
+          ...msg,
           'timestamp': DateTime.now(),
         });
       });
       _messageController.clear();
+      // Save to OrbitDB
+      await orbitDBService.addChannelMessage(widget.workspaceName, widget.channelName, msg);
     }
   }
 
@@ -295,9 +341,9 @@ class _ChannelPageState extends State<ChannelPage> {
               children: [
                 Row(
                   children: [
-                    const Text(
-                      'User',
-                      style: TextStyle(
+                    Text(
+                      message['senderName'] ?? 'User',
+                      style: const TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.bold,
                         fontSize: 14,

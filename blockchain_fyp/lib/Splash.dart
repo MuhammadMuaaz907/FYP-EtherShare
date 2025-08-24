@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'main.dart';
 import 'login_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'workspace_home_page.dart';
 
 
 class SplashScreen extends StatefulWidget {
@@ -42,11 +44,27 @@ class _SplashScreenState extends State<SplashScreen>
 
     _controller.forward();
 
-    Future.delayed(const Duration(seconds: 2), () {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
-      );
+    Future.delayed(const Duration(seconds: 2), () async {
+      final prefs = await SharedPreferences.getInstance();
+      final username = prefs.getString('username');
+      final workspaceName = prefs.getString('workspaceName');
+      final channelName = prefs.getString('channelName');
+      if (username != null && workspaceName != null && channelName != null) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => TeamHomePage(
+              workspaceName: workspaceName,
+              channelName: channelName,
+            ),
+          ),
+        );
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+        );
+      }
     });
   }
 
