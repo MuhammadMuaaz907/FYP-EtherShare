@@ -42,27 +42,51 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
       final credentials = EthPrivateKey.fromHex(_privateKey.startsWith('0x') ? _privateKey.substring(2) : _privateKey);
       final address = credentials.address.hex;
       final isRegistered = await contractService.isRegistered(address);
+      final hasProfile = await contractService.hasCompletedProfile(address);
       final workspaceExists = await contractService.doesWorkspaceExist(address);
-      if (isRegistered && workspaceExists) {
+      
+      // Debug logging
+      print('🔍 Private Key Login Debug Info:');
+      print('  - isRegistered: $isRegistered');
+      print('  - hasProfile: $hasProfile');
+      print('  - workspaceExists: $workspaceExists');
+      
+      // If user is registered, has profile, and has workspace, go to workspace
+      if (isRegistered && hasProfile && workspaceExists) {
+        print('✅ All checks passed - redirecting to workspace');
         setState(() {
           _status = 'Login successful! Redirecting to workspace...';
           _isLoading = false;
         });
         if (mounted) {
           // Fetch workspace details from OrbitDB
-          final orbitdb = OrbitDBService();
-          final workspaceJson = await orbitdb.getData(OrbitDBService.workspaceDbAddress, address);
           String workspaceName = 'YourWorkspace';
           String channelName = 'general';
-          if (workspaceJson.isNotEmpty) {
-            try {
-              final workspaceDetails = jsonDecode(workspaceJson);
-              workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
-              channelName = workspaceDetails['channelName'] ?? channelName;
-            } catch (e) {
-              print('Error decoding workspace details: $e');
+          
+          try {
+            final key = address.toLowerCase().trim();
+            final dbName = 'workspace_$key';
+            final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+            
+            if (dbAddress != null) {
+              final messages = await OrbitDBService.getMessages(dbAddress);
+              
+              // Find workspace message for this user
+              for (var message in messages) {
+                if (message['type'] == 'workspace' && message['userAddress'] == key) {
+                  final workspaceDetails = jsonDecode(message['workspaceDetails']);
+                  workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
+                  channelName = workspaceDetails['channelName'] ?? channelName;
+                  break;
+                }
+              }
             }
+          } catch (e) {
+            print('Error fetching workspace details: $e');
           }
+          
+          // Save login session to persistent storage
+          await OrbitDBService.saveLoginSession(address, workspaceName, channelName);
           Navigator.pushReplacement(
             context,
             MaterialPageRoute(
@@ -75,6 +99,23 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
         }
         return;
       }
+      
+      // If user is registered but doesn't have profile or workspace
+      if (isRegistered && (!hasProfile || !workspaceExists)) {
+        setState(() {
+          _status = 'Completing setup...';
+          _isLoading = false;
+        });
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => ProfileSetupScreen(address: address)),
+          );
+        }
+        return;
+      }
+      
+      // If user is not registered, register them
       if (!isRegistered) {
         await contractService.register(_privateKey);
       }

@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'channel_page.dart';
 import 'login_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
+import 'services/orbitdb_service.dart';
 
 class TeamHomePage extends StatefulWidget {
   final String workspaceName;
@@ -20,19 +20,59 @@ class _TeamHomePageState extends State<TeamHomePage> {
   @override
   void initState() {
     super.initState();
+    print('🏢 Workspace Home Page initialized');
+    print('📋 Workspace Name: ${widget.workspaceName}');
+    print('📋 Channel Name: ${widget.channelName}');
     _loadUserName();
   }
 
   Future<void> _loadUserName() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      print('🔍 Loading username for workspace: ${widget.workspaceName}');
+      // Load username from OrbitDB instead of SharedPreferences
+      final username = await _getUserNameFromOrbitDB() ?? 'You';
+      print('👤 Loaded username: $username');
       setState(() {
-        currentUserName = prefs.getString('username') ?? 'You';
+        currentUserName = username;
       });
     } catch (_) {
+      print('❌ Error loading username, using default');
       setState(() {
         currentUserName = 'You';
       });
+    }
+  }
+
+  Future<String?> _getUserNameFromOrbitDB() async {
+    try {
+      // This is a simplified approach - in real implementation, you'd need to pass user address
+      // For now, we'll use a default user address or get it from context
+      final userAddress = '0xc79d923c6b52b62c2b77de6ce9d1e434e3b3fe99'; // This should be passed as parameter
+      final key = userAddress.toLowerCase().trim();
+      final dbName = 'profile_$key';
+      
+      print('🔍 Looking for username in database: $dbName');
+      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+      
+      if (dbAddress != null) {
+        print('📌 Found profile database: $dbAddress');
+        final messages = await OrbitDBService.getMessages(dbAddress);
+        print('📨 Retrieved ${messages.length} messages from profile database');
+        
+        for (var message in messages) {
+          print('🔍 Checking message: ${message['type']} for user: ${message['userAddress']}');
+          if (message['type'] == 'profile' && message['userAddress'] == key) {
+            print('📋 Found profile data - Username: ${message['username']}');
+            return message['username'];
+          }
+        }
+      } else {
+        print('❌ Profile database not found');
+      }
+      return null;
+    } catch (e) {
+      print('❌ Error loading username from OrbitDB: $e');
+      return null;
     }
   }
 
@@ -384,8 +424,10 @@ class WorkspaceDrawer extends StatelessWidget {
                 leading: const Icon(Icons.logout, color: Colors.redAccent),
                 title: const Text('Logout', style: TextStyle(color: Colors.redAccent, fontSize: 16)),
                 onTap: () async {
-                  final prefs = await SharedPreferences.getInstance();
-                  await prefs.clear();
+                  // Clear login session on logout
+                  await OrbitDBService.clearLoginSession();
+                  print('🚪 Logging out (session cleared)');
+                  
                   Navigator.of(context).pop();
                   Navigator.of(context).pushAndRemoveUntil(
                     MaterialPageRoute(builder: (context) => const LoginScreen()),

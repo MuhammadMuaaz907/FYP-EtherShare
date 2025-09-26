@@ -28,6 +28,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        
+        // Add NDK configuration for native libraries
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+        }
     }
 
     buildTypes {
@@ -41,4 +46,12 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Add HTTP client for network requests
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    
+    // Add JSON processing
+    implementation("com.google.code.gson:gson:2.10.1")
 }

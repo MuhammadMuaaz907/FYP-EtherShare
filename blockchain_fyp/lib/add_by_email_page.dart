@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'project_name_page.dart';
-import 'invite_teammates_page.dart';
 
 class AddByEmailPage extends StatefulWidget {
   const AddByEmailPage({super.key});

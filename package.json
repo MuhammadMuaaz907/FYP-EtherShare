@@ -1,22 +1,38 @@
 {
-  "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "helia": "^5.4.2",
-    "nodemon": "^3.1.10",
-    "web3": "^4.16.0"
-  },
-  "name": "fyp-ethershare",
-  "version": "1.0.0",
-  "main": "mobile_test.js",
-  "directories": {
-    "test": "test"
-  },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": ""
+  "name": "fyp-ethershare",
+  "version": "1.0.0",
+  "description": "Blockchain-Based Secure File Sharing and Communication System",
+  "main": "orbitdb-server.mjs",
+  "type": "module",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "nodemon server.mjs",
+    "ipfs": "ipfs daemon",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "helia": "^5.4.2",
+    "ipfs-http-client": "^56.0.3",
+    "libp2p": "^0.46.21",
+    "multer": "^1.4.5-lts.1",
+    "nodemon": "^3.1.10",
+    "@orbitdb/core": "^3.0.3-d9e6297.0",
+    "uuid": "^10.0.0",
+    "web3": "^4.16.0",
+    "ws": "^8.17.1"
+  },
+  "keywords": [
+    "blockchain",
+    "ipfs",
+    "orbitdb",
+    "ethereum",
+    "decentralized"
+  ],
+  "author": "",
+  "license": "ISC"
 }

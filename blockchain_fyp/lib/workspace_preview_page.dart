@@ -167,7 +167,6 @@ class ChannelPreviewPage extends StatelessWidget {
                   child: ElevatedButton(
                     onPressed: () async {
                       // Save workspace for user in OrbitDB
-                      final orbitdb = OrbitDBService();
                       final key = userAddress.toLowerCase().trim();
                       final workspaceDetails = jsonEncode({
                         'workspaceName': workspaceName,
@@ -175,11 +174,10 @@ class ChannelPreviewPage extends StatelessWidget {
                       });
                       print(
                           'Saving workspace for key: $key, value: $workspaceDetails');
-                      await orbitdb.saveWorkspaceForUser(key, workspaceDetails);
-                      // Save workspaceName and channelName to SharedPreferences for auto-login
-                      final prefs = await SharedPreferences.getInstance();
-                      await prefs.setString('workspaceName', workspaceName);
-                      await prefs.setString('channelName', channelName);
+                      final success = await OrbitDBService.saveWorkspaceForUser(key, workspaceDetails);
+                      print('Workspace save result: $success');
+                      print('📌 Workspace database address cached for future use');
+                      // No need to save to SharedPreferences - all data is now in OrbitDB
                       Navigator.push(
                         context,
                         MaterialPageRoute(

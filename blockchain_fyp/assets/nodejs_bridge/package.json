@@ -1,0 +1,26 @@
+{
+  "name": "orbitdb-bridge",
+  "version": "1.0.0",
+  "description": "OrbitDB bridge for Flutter app with Helia IPFS and Libp2p",
+  "main": "orbitdb_bridge.js",
+  "scripts": {
+    "start": "node orbitdb_bridge.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "orbitdb",
+    "ipfs",
+    "helia",
+    "p2p",
+    "decentralized",
+    "flutter"
+  ],
+  "author": "FYP EtherShare",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@orbitdb/core": "^3.0.2",
+    "helia": "^5.5.1",
+    "uuid": "^13.0.0"
+  }
+}

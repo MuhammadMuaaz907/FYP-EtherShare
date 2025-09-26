@@ -27,11 +27,10 @@ class CreateWorkspacePage extends StatelessWidget {
               // Rocket illustration
               Padding(
                 padding: const EdgeInsets.only(top: 24, bottom: 16),
-                child: Image.asset(
-                  'assets/rocket.png',
-                  height: 180,
-                  fit: BoxFit.contain,
-                  errorBuilder: (context, error, stackTrace) => Icon(Icons.rocket_launch, size: 120, color: Colors.white24),
+                child: Icon(
+                  Icons.rocket_launch, 
+                  size: 120, 
+                  color: Colors.white24
                 ),
               ),
               const SizedBox(height: 12),

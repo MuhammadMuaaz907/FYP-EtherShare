@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'main.dart';
 import 'login_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'home_screen.dart';
+import 'ProfileSetup.dart';
+import 'workspace_preview_page.dart';
 import 'workspace_home_page.dart';
+import 'services/contract_service.dart';
+import 'services/orbitdb_service.dart';
 
 
 class SplashScreen extends StatefulWidget {
@@ -23,49 +26,94 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   void initState() {
     super.initState();
+    print('🚀 SplashScreen initState called');
 
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    );
+    try {
+      _controller = AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 1200),
+      );
 
-    _rotation = Tween<double>(begin: -1.0, end: 0.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutBack),
-    );
+      _rotation = Tween<double>(begin: -1.0, end: 0.0).animate(
+        CurvedAnimation(parent: _controller, curve: Curves.easeOutBack),
+      );
 
-    _slide =
-        Tween<Offset>(begin: const Offset(0, -0.4), end: Offset.zero).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-    );
+      _slide =
+          Tween<Offset>(begin: const Offset(0, -0.4), end: Offset.zero).animate(
+        CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+      );
 
-    _opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeIn),
-    );
+      _opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+        CurvedAnimation(parent: _controller, curve: Curves.easeIn),
+      );
 
-    _controller.forward();
+      _controller.forward();
+      print('🎬 Animation started');
 
-    Future.delayed(const Duration(seconds: 2), () async {
-      final prefs = await SharedPreferences.getInstance();
-      final username = prefs.getString('username');
-      final workspaceName = prefs.getString('workspaceName');
-      final channelName = prefs.getString('channelName');
-      if (username != null && workspaceName != null && channelName != null) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => TeamHomePage(
-              workspaceName: workspaceName,
-              channelName: channelName,
+      Future.delayed(const Duration(seconds: 2), () {
+        print('⏰ Timer completed, checking session...');
+        if (mounted) {
+          _checkSessionAndNavigate();
+        }
+      });
+    } catch (e) {
+      print('❌ SplashScreen initState error: $e');
+      // Fallback: navigate immediately if animation fails
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const LoginScreen()),
+          );
+        }
+      });
+    }
+  }
+
+  // Check session and navigate accordingly
+  Future<void> _checkSessionAndNavigate() async {
+    try {
+      print('🔍 Checking user session...');
+      
+      // Check if user is logged in
+      final session = await OrbitDBService.getLoginSession();
+      
+      if (session['isLoggedIn'] == 'true') {
+        final userAddress = session['userAddress'];
+        final workspaceName = session['workspaceName'] ?? 'YourWorkspace';
+        final channelName = session['channelName'] ?? 'general';
+        
+        if (userAddress != null) {
+          print('✅ User is logged in, redirecting to workspace');
+          print('📋 User: $userAddress, Workspace: $workspaceName, Channel: $channelName');
+          
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => TeamHomePage(
+                workspaceName: workspaceName,
+                channelName: channelName,
+              ),
             ),
-          ),
-        );
-      } else {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const LoginScreen()),
-        );
+          );
+          return;
+        }
       }
-    });
+      
+      // If not logged in or session invalid, go to login screen
+      print('➡️ User not logged in, redirecting to LoginScreen');
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+      );
+    } catch (e) {
+      print('❌ Error in session check: $e');
+      // Fallback to login screen
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+      );
+    }
   }
 
   @override
@@ -76,6 +124,7 @@ class _SplashScreenState extends State<SplashScreen>
 
   @override
   Widget build(BuildContext context) {
+    print('🎨 SplashScreen build method called');
     return Scaffold(
       backgroundColor: Colors.white,
       body: Center(
@@ -93,7 +142,31 @@ class _SplashScreenState extends State<SplashScreen>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Image.asset('assets/logo.png', width: 120),
+              // Logo with error handling
+              Container(
+                width: 120,
+                height: 120,
+                child: Image.asset(
+                  'assets/logo.png', 
+                  width: 120,
+                  errorBuilder: (context, error, stackTrace) {
+                    print('❌ Logo image error: $error');
+                    return Container(
+                      width: 120,
+                      height: 120,
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade100,
+                        borderRadius: BorderRadius.circular(60),
+                      ),
+                      child: Icon(
+                        Icons.share,
+                        size: 60,
+                        color: Colors.blue.shade800,
+                      ),
+                    );
+                  },
+                ),
+              ),
               const SizedBox(height: 16),
               Text(
                 'Ether Share',

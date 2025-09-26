@@ -1,13 +1,12 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:get_it/get_it.dart';
 import 'services/ipfs_service.dart';
 import 'services/orbitdb_service.dart';
-import 'package:dio/dio.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class ChannelPage extends StatefulWidget {
   final String channelName;
@@ -33,29 +32,79 @@ class _ChannelPageState extends State<ChannelPage> {
     _loadUserNameAndMessages();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Reload messages when returning to this page
+    _loadMessages();
+  }
+
   Future<void> _loadUserNameAndMessages() async {
-    // Load user name from SharedPreferences
+    // Load user name from OrbitDB instead of SharedPreferences
     try {
-      final prefs = await SharedPreferences.getInstance();
-      currentUserName = prefs.getString('username') ?? 'User';
+      // Get user address from workspace context (you might need to pass this as parameter)
+      // For now, using a default approach
+      currentUserName = await _getUserNameFromOrbitDB() ?? 'User';
     } catch (_) {
       currentUserName = 'User';
     }
     await _loadMessages();
   }
 
+  Future<String?> _getUserNameFromOrbitDB() async {
+    try {
+      // This is a simplified approach - in real implementation, you'd need to pass user address
+      // For now, we'll use a default user address or get it from context
+      final userAddress = '0xc79d923c6b52b62c2b77de6ce9d1e434e3b3fe99'; // This should be passed as parameter
+      final key = userAddress.toLowerCase().trim();
+      final dbName = 'profile_$key';
+      final dbAddress = await OrbitDBService.createChatDB(dbName);
+      
+      if (dbAddress != null) {
+        final messages = await OrbitDBService.getMessages(dbAddress);
+        
+        for (var message in messages) {
+          if (message['type'] == 'profile' && message['userAddress'] == key) {
+            return message['username'];
+          }
+        }
+      }
+      return null;
+    } catch (e) {
+      print('Error loading username from OrbitDB: $e');
+      return null;
+    }
+  }
+
   Future<void> _loadMessages() async {
-    List<Map<String, dynamic>> loaded = await orbitDBService.getChannelMessages(widget.workspaceName, widget.channelName);
+    try {
+      List<Map<String, dynamic>> loaded = await OrbitDBService.getChannelMessages(widget.workspaceName, widget.channelName);
+      
+      // Debug: Print loaded messages to see their structure
+      print('📨 Loaded ${loaded.length} messages:');
+      for (var msg in loaded) {
+        print('  - Type: ${msg['type']}, Content: ${msg['content']}, FileName: ${msg['fileName']}');
+      }
+      
     // Parse timestamps back to DateTime
     for (var msg in loaded) {
       if (msg['timestamp'] is String) {
         msg['timestamp'] = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
+        } else if (msg['timestamp'] is int) {
+          msg['timestamp'] = DateTime.fromMillisecondsSinceEpoch(msg['timestamp']);
       }
     }
+      
     setState(() {
       _messages.clear();
       _messages.addAll(loaded);
     });
+    } catch (e) {
+      print('❌ Error loading messages: $e');
+      setState(() {
+        status = 'Failed to load messages: $e';
+      });
+    }
   }
 
   Future<void> uploadFile() async {
@@ -64,25 +113,28 @@ class _ChannelPageState extends State<ChannelPage> {
       FilePickerResult? result = await FilePicker.platform.pickFiles();
       if (result != null) {
         File file = File(result.files.single.path!);
-        // Upload to IPFS
-        String cid = await ipfsService.uploadFileToIPFS(file);
-        if (cid.isNotEmpty) {
-          // Pin the file
-          await ipfsService.pinFile(cid);
-          // Create OrbitDB database
-          String dbAddress = await orbitDBService.createDatabase('file-metadata-${DateTime.now().millisecondsSinceEpoch}');
-          // Store CID in OrbitDB
-          bool success = await orbitDBService.addData(dbAddress, 'file-cid', cid);
-
-          if (success) {
+        Uint8List fileBytes = await file.readAsBytes();
+        
+        // Upload file using OrbitDB service (which uses server)
+        final uploadResult = await OrbitDBService.uploadFile(
+          widget.workspaceName, 
+          result.files.single.name, 
+          fileBytes
+        );
+        
+        if (uploadResult != null && uploadResult['success'] == true) {
             final msg = {
               'type': 'file',
-              'content': 'File uploaded! CID: $cid',
-              'timestamp': DateTime.now().toIso8601String(),
+            'content': 'File uploaded successfully!',
+            'timestamp': DateTime.now().millisecondsSinceEpoch, // Use milliseconds for consistency
               'fileName': result.files.single.name,
-              'cid': cid,
+            'cid': uploadResult['fileCid'],
               'senderName': currentUserName,
+            'workspace': widget.workspaceName,
+            'channel': widget.channelName,
             };
+          
+          // Add to local state immediately
             setState(() {
               _messages.add({
                 ...msg,
@@ -90,16 +142,19 @@ class _ChannelPageState extends State<ChannelPage> {
               });
               status = 'File uploaded successfully!';
             });
+          
             // Save to OrbitDB
-            await orbitDBService.addChannelMessage(widget.workspaceName, widget.channelName, msg);
-          } else {
+          final success = await OrbitDBService.addChannelMessage(widget.workspaceName, widget.channelName, msg);
+          if (!success) {
+            // If save failed, remove from local state
             setState(() {
-              status = 'Failed to store in OrbitDB';
+              _messages.removeLast();
+              status = 'Failed to save file message';
             });
           }
         } else {
           setState(() {
-            status = 'Failed to upload to IPFS';
+            status = 'Failed to upload file to server';
           });
         }
       } else {
@@ -119,18 +174,33 @@ class _ChannelPageState extends State<ChannelPage> {
       final msg = {
         'type': 'text',
         'content': _messageController.text.trim(),
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': DateTime.now().millisecondsSinceEpoch, // Use milliseconds for consistency
         'senderName': currentUserName,
+        'workspace': widget.workspaceName,
+        'channel': widget.channelName,
       };
+      
+      // Add to local state immediately for UI responsiveness
       setState(() {
         _messages.add({
           ...msg,
           'timestamp': DateTime.now(),
         });
       });
+      
       _messageController.clear();
+      
       // Save to OrbitDB
-      await orbitDBService.addChannelMessage(widget.workspaceName, widget.channelName, msg);
+      final success = await OrbitDBService.addChannelMessage(widget.workspaceName, widget.channelName, msg);
+      if (!success) {
+        // If save failed, remove from local state
+        setState(() {
+          _messages.removeLast();
+        });
+        setState(() {
+          status = 'Failed to send message';
+        });
+      }
     }
   }
 
@@ -139,21 +209,31 @@ class _ChannelPageState extends State<ChannelPage> {
       setState(() {
         status = 'Downloading file...';
       });
-      // Use a public IPFS gateway or your own node
-      final url = 'https://ipfs.io/ipfs/$cid';
+      
+      // Download file using OrbitDB service (which uses server)
+      final fileBytes = await OrbitDBService.downloadFile(cid);
+      
+      if (fileBytes != null) {
       final dir = await getTemporaryDirectory();
       final filePath = '${dir.path}/$fileName';
 
-      final dio = Dio();
-      await dio.download(url, filePath);
+        // Write file to local storage
+        final file = File(filePath);
+        await file.writeAsBytes(fileBytes);
 
       setState(() {
         status = 'File downloaded. Opening...';
       });
+        
       await OpenFile.open(filePath);
       setState(() {
         status = '';
       });
+      } else {
+        setState(() {
+          status = 'Failed to download file from server';
+        });
+      }
     } catch (e) {
       setState(() {
         status = 'Error downloading/opening file: $e';
@@ -360,7 +440,7 @@ class _ChannelPageState extends State<ChannelPage> {
                   ],
                 ),
                 const SizedBox(height: 4),
-                if (message['type'] == 'file')
+                if (message['type'] == 'file' || (message['fileName'] != null && message['cid'] != null))
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(

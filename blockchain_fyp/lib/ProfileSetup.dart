@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'main.dart';
-import 'home_screen.dart';
 import 'create_workspace_page.dart';
+import 'services/orbitdb_service.dart';
 
 class ProfileSetupScreen extends StatefulWidget {
   final String address;
@@ -17,29 +16,61 @@ class ProfileSetupScreen extends StatefulWidget {
 class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _emailController = TextEditingController();
-  bool _showPrivateKey = false;
-  String? _privateKey;
   String _status = '';
 
   @override
   void initState() {
     super.initState();
-    _privateKey = 'Unable to fetch private key securely. Export from MetaMask.';
   }
 
   Future<void> _saveProfile() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('username', _usernameController.text.trim());
-      await prefs.setString('email', _emailController.text.trim());
-      setState(() {
-        _status = 'Profile saved successfully!';
-      });
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.address)),
-      );
+      // Save profile to OrbitDB instead of local storage
+      final key = widget.address.toLowerCase().trim();
+      final dbName = 'profile_$key';
+      
+      // Create the database first (this will store the address in cache)
+      final dbAddress = await OrbitDBService.createChatDB(dbName);
+      
+      print('💾 Saving profile to database: $dbAddress');
+      
+      if (dbAddress != null) {
+        final profileMessage = {
+          'type': 'profile',
+          'userAddress': key,
+          'username': _usernameController.text.trim(),
+          'email': _emailController.text.trim(),
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        };
+        
+        print('📋 Profile message: $profileMessage');
+        
+        final result = await OrbitDBService.addMessage(dbAddress, profileMessage);
+        
+        if (result != null) {
+          print('✅ Profile saved successfully with hash: $result');
+          print('📌 Database address cached for future use: $dbAddress');
+          setState(() {
+            _status = 'Profile saved successfully to OrbitDB!';
+          });
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.address)),
+          );
+        } else {
+          print('❌ Failed to save profile message');
+          setState(() {
+            _status = 'Error saving profile to OrbitDB';
+          });
+        }
+      } else {
+        print('❌ Failed to create profile database');
+        setState(() {
+          _status = 'Error creating profile database';
+        });
+      }
     } catch (e) {
+      print('❌ Error saving profile: $e');
       setState(() {
         _status = 'Error saving profile: $e';
       });
