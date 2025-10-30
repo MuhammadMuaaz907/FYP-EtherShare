@@ -1,3 +1,4 @@
+
 import 'package:blockchain_fyp/splash.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -10,9 +11,19 @@ import 'package:http/http.dart' as http;
 import 'package:hex/hex.dart';
 import 'dart:typed_data';
 import 'services/contract_service.dart';
+import 'services/secure_storage_service.dart';
+import 'services/biometric_service.dart';
 import 'ProfileSetup.dart';
+import 'screens/verify_2fa_screen.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await dotenv.load(fileName: '.env');
+  } catch (e) {
+    // If .env is missing in non-prod, continue; SMTP init will validate
+  }
   GetIt.I.registerSingletonAsync<Web3App>(() async {
     final app = await Web3App.createInstance(
       projectId: '8b3a8acfa9a31912661157c7137ae314',
@@ -54,8 +65,10 @@ class MyApp extends StatelessWidget {
               backgroundColor: Colors.blue[700],
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              textStyle:
+                  const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
             ),
           ),
         ),
@@ -72,8 +85,8 @@ class LoginScreen extends StatefulWidget {
   _LoginScreenState createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin {
-
+class _LoginScreenState extends State<LoginScreen>
+    with TickerProviderStateMixin {
   String _status = '';
   bool _isLoading = false;
   String? _connectedAddress;
@@ -87,7 +100,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   @override
   void initState() {
     super.initState();
-    
+
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 700),
@@ -100,9 +113,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     WidgetsBinding.instance.addPostFrameCallback((_) => _controller.forward());
     _initializeWalletConnect();
   }
-
-
-
 
   Future<void> _initializeWalletConnect() async {
     try {
@@ -177,7 +187,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       if (_sessionData!.namespaces['eip155']!.accounts.isNotEmpty) {
         final account = _sessionData!.namespaces['eip155']!.accounts.firstWhere(
           (acc) => acc.contains('eip155:1337'),
-          orElse: () => throw Exception('No account found for chain eip155:1337'),
+          orElse: () =>
+              throw Exception('No account found for chain eip155:1337'),
         );
         final address = account.split(':').last;
         setState(() {
@@ -185,7 +196,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           _status = 'Connected to MetaMask: $_connectedAddress';
         });
 
-        final contractService = Provider.of<ContractService?>(context, listen: false);
+        final contractService =
+            Provider.of<ContractService?>(context, listen: false);
         if (contractService == null) {
           setState(() {
             _status = 'Contract service not initialized';
@@ -197,14 +209,18 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         try {
           // Switch chain
           print('Requesting chain switch to eip155:1337...');
-          await _web3App!.request(
+          await _web3App!
+              .request(
             topic: _sessionData!.topic,
             chainId: 'eip155:1337',
             request: SessionRequestParams(
               method: 'wallet_switchEthereumChain',
-              params: [{'chainId': '0x539'}],
+              params: [
+                {'chainId': '0x539'}
+              ],
             ),
-          ).timeout(
+          )
+              .timeout(
             const Duration(seconds: 30),
             onTimeout: () {
               print('Chain switch timed out, continuing anyway...');
@@ -226,7 +242,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               _status = 'Registering user...';
             });
             print('Registering user...');
-            final registerTx = await contractService.registerWithAddress(address);
+            final registerTx =
+                await contractService.registerWithAddress(address);
             setState(() {
               _status = 'Registration successful: $registerTx';
             });
@@ -245,10 +262,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           });
 
           if (mounted) {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => ProfileSetupScreen(address: address)),
-            );
+            // Check if 2FA is enabled before navigating
+            await _checkAndNavigateWith2FA(context, address);
           }
         } catch (e) {
           print('Transaction Error: $e');
@@ -285,7 +300,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       _status = 'Logging in with private key...';
     });
 
-    final contractService = Provider.of<ContractService?>(context, listen: false);
+    final contractService =
+        Provider.of<ContractService?>(context, listen: false);
     if (contractService == null) {
       setState(() {
         _status = 'Contract service not initialized';
@@ -295,7 +311,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     }
 
     try {
-      final credentials = EthPrivateKey.fromHex(_privateKey.startsWith('0x') ? _privateKey.substring(2) : _privateKey);
+      final credentials = EthPrivateKey.fromHex(_privateKey.startsWith('0x')
+          ? _privateKey.substring(2)
+          : _privateKey);
       final address = credentials.address.hex;
       print('Checking registration for $address...');
       final isRegistered = await contractService.isRegistered(address);
@@ -314,10 +332,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         _isLoading = false;
       });
       if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => ProfileSetupScreen(address: address)),
-        );
+        // Check if 2FA is enabled before navigating
+        await _checkAndNavigateWith2FA(context, address);
       }
     } catch (e) {
       print('Private key login error: $e');
@@ -325,6 +341,144 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         _status = 'Private key login error: $e';
         _isLoading = false;
       });
+    }
+  }
+
+  /// Enhanced helper method to check 2FA status and navigate accordingly
+  /// 
+  /// This method:
+  /// - Checks both local storage and blockchain 2FA status
+  /// - Handles edge cases (2FA disabled, biometric unavailable, etc.)
+  /// - Provides proper error handling and fallback navigation
+  /// - Integrates with TOTPService, BiometricService, and SecureStorageService
+  Future<void> _checkAndNavigateWith2FA(BuildContext context, String address) async {
+    try {
+      setState(() {
+        _isLoading = true;
+        _status = 'Checking 2FA status...';
+      });
+
+      // Initialize services
+      final storageService = await SecureStorageService.create();
+      final contractService = Provider.of<ContractService?>(context, listen: false);
+      
+      if (contractService == null) {
+        throw Exception('Contract service not available');
+      }
+
+      // Check local 2FA status
+      final local2FAEnabled = await storageService.isUser2FAEnabled();
+      
+      // Check blockchain 2FA status
+      bool blockchain2FAEnabled = false;
+      try {
+        blockchain2FAEnabled = await contractService.is2FAEnabled(address);
+        print('Blockchain 2FA status: $blockchain2FAEnabled');
+      } catch (e) {
+        print('Error checking blockchain 2FA status: $e');
+        // Continue with local status if blockchain check fails
+      }
+
+      // Determine if 2FA is enabled (either locally or on blockchain)
+      final is2FAEnabled = local2FAEnabled || blockchain2FAEnabled;
+
+      if (is2FAEnabled) {
+        // Check if user is locked out
+        bool isLockedOut = false;
+        int remainingLockoutTime = 0;
+        
+        try {
+          isLockedOut = await contractService.isLockedOut(address);
+          if (isLockedOut) {
+            remainingLockoutTime = await contractService.getRemainingLockoutTime(address);
+            print('User is locked out for $remainingLockoutTime seconds');
+          }
+        } catch (e) {
+          print('Error checking lockout status: $e');
+        }
+
+        if (isLockedOut) {
+          // Show lockout message and navigate to profile setup
+          setState(() {
+            _isLoading = false;
+            _status = 'Account temporarily locked. Please try again in ${remainingLockoutTime ~/ 60} minutes.';
+          });
+          
+          await Future.delayed(const Duration(seconds: 3));
+          
+          if (mounted) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ProfileSetupScreen(address: address),
+              ),
+            );
+          }
+          return;
+        }
+
+        // Check biometric availability
+        final biometricAvailable = await BiometricService.isBiometricAvailable();
+        final biometricEnabled = await storageService.isBiometricEnabled();
+        
+        print('Biometric available: $biometricAvailable, enabled: $biometricEnabled');
+
+        // Navigate to 2FA verification screen
+        setState(() {
+          _isLoading = false;
+          _status = '2FA verification required';
+        });
+
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => Verify2FAScreen(
+                userId: address,
+                userAddress: address,
+              ),
+            ),
+          );
+        }
+      } else {
+        // Check if this is a new user who should be offered 2FA setup
+        final isNewUser = !local2FAEnabled && !blockchain2FAEnabled;
+        
+        setState(() {
+          _isLoading = false;
+          _status = isNewUser ? 'Welcome! Setting up your profile...' : 'Profile setup';
+        });
+
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ProfileSetupScreen(
+                address: address,
+                show2FASetup: isNewUser, // Pass flag to show 2FA setup option
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('Error in 2FA check: $e');
+      setState(() {
+        _isLoading = false;
+        _status = 'Error checking security status: $e';
+      });
+      
+      // Fallback to profile setup if 2FA check fails
+      await Future.delayed(const Duration(seconds: 2));
+      
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ProfileSetupScreen(address: address),
+          ),
+        );
+      }
     }
   }
 
@@ -399,7 +553,71 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                           const SizedBox(height: 12),
                           OutlinedButton(
                             onPressed: () {
-                              
+                              showDialog(
+                                context: context,
+                                builder: (context) {
+                                  String privateKeyInput = '';
+                                  return AlertDialog(
+                                    backgroundColor: Colors.white,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                    ),
+                                    title: const Text(
+                                      'Login with Private Key',
+                                      style: TextStyle(
+                                          fontWeight: FontWeight.bold),
+                                    ),
+                                    content: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Text(
+                                          'Enter your private key below to continue:',
+                                          style: TextStyle(
+                                              fontSize: 13,
+                                              color: Colors.black54),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        TextField(
+                                          obscureText: true,
+                                          maxLines: 1,
+                                          decoration: InputDecoration(
+                                            hintText: 'Enter Private Key',
+                                            border: OutlineInputBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                            ),
+                                            prefixIcon:
+                                                const Icon(Icons.vpn_key),
+                                          ),
+                                          onChanged: (val) =>
+                                              privateKeyInput = val,
+                                        ),
+                                      ],
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(context),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      ElevatedButton(
+                                        onPressed: () async {
+                                          Navigator.pop(
+                                              context); // close dialog
+                                          setState(() {
+                                            _privateKey = privateKeyInput;
+                                          });
+                                          await _loginWithPrivateKey(); // call existing login logic
+                                        },
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.blue[700],
+                                          foregroundColor: Colors.white,
+                                        ),
+                                        child: const Text('Login'),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              );
                             },
                             style: OutlinedButton.styleFrom(
                               padding: const EdgeInsets.symmetric(vertical: 14),
@@ -416,6 +634,22 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                       ),
                     ),
                   ),
+                  if (_status.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 16),
+                      child: Center(
+                        child: Text(
+                          _status,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: _status.contains('successful')
+                                ? Colors.green
+                                : Colors.redAccent,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -425,8 +659,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     );
   }
 }
-
-
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
