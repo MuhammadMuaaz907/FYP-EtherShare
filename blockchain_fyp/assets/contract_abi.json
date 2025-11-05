@@ -20020,21 +20020,12 @@
     "5777": {
       "events": {},
       "links": {},
-<<<<<<< HEAD
-      "address": "0xa8FD94cD7f4Ee4513E938106911E56770d73CCf1",
-      "transactionHash": "0xc0470c994c885842125b686051deee850ed196d05e88baa5e789623abd7cae8c"
-    }
-  },
-  "schemaVersion": "3.4.16",
-  "updatedAt": "2025-07-15T19:47:06.815Z",
-=======
       "address": "0x15D9fDF2c6514047A2FFa4B8eD0fa87BB069a0Cd",
       "transactionHash": "0xea166e473e991b6433fea4ae4289cb310b9f74c76144b55fc20e8cc1f98a6dc4"
     }
   },
   "schemaVersion": "3.4.16",
   "updatedAt": "2025-10-26T06:12:28.645Z",
->>>>>>> origin/Module1-Authentication
   "networkType": "ethereum",
   "devdoc": {
     "author": "EtherShare Team  This contract provides: - User registration and login functionality - Two-Factor Authentication (2FA) support - Backup code management - Rate limiting and security features - Comprehensive event logging",
