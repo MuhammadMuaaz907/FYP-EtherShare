@@ -1,3 +1,4 @@
+
 import 'package:blockchain_fyp/splash.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -10,11 +11,21 @@ import 'package:http/http.dart' as http;
 import 'package:hex/hex.dart';
 import 'dart:typed_data';
 import 'services/contract_service.dart';
+import 'services/secure_storage_service.dart';
+import 'services/biometric_service.dart';
 import 'ProfileSetup.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
+import 'screens/verify_2fa_screen.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await dotenv.load(fileName: '.env');
+  } catch (e) {
+    // If .env is missing in non-prod, continue; SMTP init will validate
+  }
   GetIt.I.registerSingletonAsync<Web3App>(() async {
     final app = await Web3App.createInstance(
       projectId: '1f976613b40ddd232f1339e8ae5f1634',
@@ -56,8 +67,10 @@ class MyApp extends StatelessWidget {
               backgroundColor: Colors.blue[700],
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              textStyle:
+                  const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
             ),
           ),
         ),
@@ -67,7 +80,5 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// LoginScreen aur uski state ko yahan se hata diya gaya hai, ab yeh login_screen.dart mein hai.
-
-
-// HomeScreen ki implementation yahan se hata di gayi hai, ab yeh home_screen.dart mein hai.
+// LoginScreen and HomeScreen are now in separate files (login_screen.dart and home_screen.dart)
+// This keeps the code organized and maintainable
