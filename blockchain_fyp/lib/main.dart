@@ -1,30 +1,20 @@
-
 import 'package:blockchain_fyp/splash.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:web3dart/web3dart.dart';
 import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:get_it/get_it.dart';
-import 'package:url_launcher/url_launcher.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:http/http.dart' as http;
-import 'package:hex/hex.dart';
-import 'dart:typed_data';
 import 'services/contract_service.dart';
-import 'services/secure_storage_service.dart';
-import 'services/biometric_service.dart';
-import 'ProfileSetup.dart';
-import 'login_screen.dart';
-import 'home_screen.dart';
-import 'screens/verify_2fa_screen.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     await dotenv.load(fileName: '.env');
+    print('Environment file (.env) loaded successfully');
   } catch (e) {
-    // If .env is missing in non-prod, continue; SMTP init will validate
+    // If .env is missing, log warning but continue
+    print('Warning: Could not load .env file: $e');
+    print('SMTP configuration will be required when sending emails.');
   }
   GetIt.I.registerSingletonAsync<Web3App>(() async {
     final app = await Web3App.createInstance(

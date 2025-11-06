@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:email_validator/email_validator.dart';
-import 'main.dart';
-import 'home_screen.dart';
 import 'create_workspace_page.dart';
 import 'screens/setup_2fa_screen.dart';
 import 'services/secure_storage_service.dart';

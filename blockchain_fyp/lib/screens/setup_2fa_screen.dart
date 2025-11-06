@@ -4,7 +4,7 @@ import 'dart:async';
 import '../services/email_otp_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/biometric_service.dart';
-import '../main.dart'; // For HomeScreen
+import '../create_workspace_page.dart'; // For workspace creation after 2FA setup
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// Comprehensive 2FA Setup Screen with Email OTP
@@ -15,7 +15,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 /// - OTP code input with countdown timer
 /// - Resend OTP functionality with rate limiting
 /// - Backup codes generation and display
-/// - Success navigation to HomeScreen
+/// - Success navigation to CreateWorkspacePage (workspace management flow)
 /// - Integration with EmailOTPService and SecureStorageService
 class Setup2FAScreen extends StatefulWidget {
   final String userId;
@@ -219,6 +219,9 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     });
 
     try {
+      // Ensure SMTP is configured before sending OTP
+      await _ensureSMTPConfigured();
+      
       final sent = await _emailOtpService!.sendOTP(
         email: _emailController.text,
         userName: widget.userId,
@@ -280,6 +283,70 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     }
   }
 
+  /// Ensure SMTP is configured
+  Future<void> _ensureSMTPConfigured() async {
+    try {
+      // Check if dotenv is initialized
+      if (!dotenv.isInitialized) {
+        // Try to load .env file from assets (for mobile) or root (for web/desktop)
+        try {
+          await dotenv.load(fileName: '.env');
+        } catch (e1) {
+          // Try loading from assets as fallback
+          try {
+            await dotenv.load(fileName: 'assets/.env');
+          } catch (e2) {
+            throw Exception(
+              'Environment file (.env) not found or could not be loaded.\n\n'
+              'Please create a .env file in the blockchain_fyp directory with:\n\n'
+              'SMTP_USERNAME=your_email@gmail.com\n'
+              'SMTP_PASSWORD=your_app_password\n'
+              'SMTP_HOST=smtp.gmail.com\n'
+              'SMTP_PORT=587\n'
+              'SMTP_SECURE=true\n\n'
+              'After creating .env, ensure it is listed in pubspec.yaml assets section,\n'
+              'then restart your app with: flutter clean && flutter run\n\n'
+              'Error: $e1'
+            );
+          }
+        }
+      }
+      
+      // Try to configure SMTP from environment variables
+      final username = dotenv.env['SMTP_USERNAME'] ?? '';
+      final password = dotenv.env['SMTP_PASSWORD'] ?? '';
+      final host = dotenv.env['SMTP_HOST'] ?? '';
+      final portStr = dotenv.env['SMTP_PORT'] ?? '';
+      final useSecureStr = dotenv.env['SMTP_SECURE'] ?? 'true';
+
+      if (username.isEmpty || password.isEmpty || host.isEmpty || portStr.isEmpty) {
+        throw Exception(
+          'SMTP configuration is missing.\n\n'
+          'Please create a .env file in the blockchain_fyp directory with the following:\n\n'
+          'SMTP_USERNAME=your_email@gmail.com\n'
+          'SMTP_PASSWORD=your_app_password\n'
+          'SMTP_HOST=smtp.gmail.com\n'
+          'SMTP_PORT=587\n'
+          'SMTP_SECURE=true\n\n'
+          'For Gmail, you need to use an App Password, not your regular password.'
+        );
+      }
+
+      final port = int.tryParse(portStr) ?? 587;
+      final useSecure = useSecureStr.toLowerCase() != 'false';
+
+      await _emailOtpService!.configureSMTP(
+        username: username,
+        password: password,
+        host: host,
+        port: port,
+        useSecure: useSecure,
+      );
+    } catch (e) {
+      throw Exception('Failed to configure SMTP: $e');
+    }
+  }
+
   /// Resend OTP
   Future<void> _resendOTP() async {
     if (!_canResend) {
@@ -293,6 +360,9 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     });
 
     try {
+      // Ensure SMTP is configured before resending OTP
+      await _ensureSMTPConfigured();
+      
       final resent = await _emailOtpService!.resendOTP(
         email: _userEmail,
         userName: widget.userId,
@@ -403,16 +473,17 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
             onPressed: () {
               Navigator.pop(context); // Close dialog
               Navigator.popUntil(context, (route) => route.isFirst); // Pop all routes
+              // Navigate to workspace creation page after 2FA setup
               Navigator.pushReplacement(
                 context,
-                MaterialPageRoute(builder: (_) => const HomeScreen()),
+                MaterialPageRoute(builder: (_) => const CreateWorkspacePage()),
               );
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.blue[700],
               foregroundColor: Colors.white,
             ),
-            child: const Text('Continue to Home'),
+            child: const Text('Continue'),
           ),
         ],
       ),

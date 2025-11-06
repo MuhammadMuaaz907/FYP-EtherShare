@@ -15,7 +15,7 @@ import 'two_fa_error_handler.dart';
 /// - Gas estimation and transaction optimization
 /// - Integration with existing blockchain operations
 class ContractService {
-  final String _rpcUrl = 'https://a431f6d34d22.ngrok-free.app';
+  final String _rpcUrl = 'https://72c9ada44c60.ngrok-free.app';
   final String _contractAddress = '0x15D9fDF2c6514047A2FFa4B8eD0fa87BB069a0Cd'; // Updated contract with 2FA functions
   late Web3Client _client;
   late DeployedContract _contract;
