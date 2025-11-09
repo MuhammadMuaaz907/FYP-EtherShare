@@ -4,17 +4,28 @@ import 'package:provider/provider.dart';
 import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:get_it/get_it.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'services/contract_service.dart';
 import 'services/ipfs_service.dart';
 import 'services/orbitdb_service.dart';
 
-void main() {
+Future<void> main() async {
   try {
     print('🚀 Starting EtherShare App...');
     
     // Ensure Flutter binding is initialized first
     WidgetsFlutterBinding.ensureInitialized();
     print('✅ Flutter binding initialized');
+    
+    // Load environment variables
+    try {
+      await dotenv.load(fileName: '.env');
+      print('Environment file (.env) loaded successfully');
+    } catch (e) {
+      // If .env is missing, log warning but continue
+      print('Warning: Could not load .env file: $e');
+      print('SMTP configuration will be required when sending emails.');
+    }
     
     GetIt.I.registerSingleton<IPFSService>(IPFSService());
     GetIt.I.registerSingleton<OrbitDBService>(OrbitDBService());
@@ -124,8 +135,10 @@ class _MyAppState extends State<MyApp> {
               backgroundColor: Colors.blue[700],
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              textStyle:
+                  const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
             ),
           ),
         ),
@@ -141,7 +154,5 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
-// LoginScreen aur uski state ko yahan se hata diya gaya hai, ab yeh login_screen.dart mein hai.
-
-
-// HomeScreen ki implementation yahan se hata di gayi hai, ab yeh home_screen.dart mein hai.
+// LoginScreen and HomeScreen are now in separate files (login_screen.dart and home_screen.dart)
+// This keeps the code organized and maintainable

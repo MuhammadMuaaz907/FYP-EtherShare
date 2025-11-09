@@ -217,7 +217,6 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
         }
     }
 
-
     override fun onDestroy() {
         super.onDestroy()
         executor.shutdown()
