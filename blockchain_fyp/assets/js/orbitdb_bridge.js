@@ -141,22 +141,29 @@ export async function addMessage(address, msgObj) {
     }
     
     console.log(`💬 Adding message to database: ${address}`);
+    console.log(`📋 Message object:`, JSON.stringify(msgObj, null, 2));
     
     // Open the database by address
     const db = await orbitdb.open(address);
     await db.load();
     
-    // Create message object with required fields
+    // Create message object - preserve ALL fields from msgObj
+    // Add required fields with defaults if not present
     const message = {
-      id: uuidv4(),
-      text: msgObj.text || '',
-      cid: msgObj.cid || '', // IPFS CID for file attachments
+      id: msgObj.id || uuidv4(),
       timestamp: msgObj.timestamp || Date.now(),
-      sender: msgObj.sender || 'unknown',
-      type: msgObj.type || 'text', // 'text' or 'file'
+      // Preserve all fields from the original message object
+      ...msgObj,
+      // Ensure required fields have defaults if not provided
+      text: msgObj.text || msgObj.content || '',
+      cid: msgObj.cid || '',
+      sender: msgObj.sender || msgObj.senderName || 'unknown',
+      type: msgObj.type || 'text',
       fileName: msgObj.fileName || '',
       fileSize: msgObj.fileSize || 0
     };
+    
+    console.log(`📝 Final message to save:`, JSON.stringify(message, null, 2));
     
     // Add message to database
     const hash = await db.add(message);
@@ -192,10 +199,17 @@ export async function getMessages(address) {
     const db = await orbitdb.open(address);
     await db.load();
     
-    // Get all messages
-    const messages = db.all;
+    // Get all messages - extract payload values
+    const allEntries = db.iterator({ limit: -1 }).collect();
+    const messages = allEntries.map(entry => {
+      // Extract the value from the entry
+      const value = entry.payload.value;
+      console.log(`📄 Message entry:`, JSON.stringify(value, null, 2));
+      return value;
+    });
     
     console.log(`✅ Retrieved ${messages.length} messages`);
+    console.log(`📊 Sample message:`, messages.length > 0 ? JSON.stringify(messages[0], null, 2) : 'No messages');
     
     return {
       success: true,

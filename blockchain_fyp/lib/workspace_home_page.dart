@@ -15,7 +15,12 @@ class TeamHomePage extends StatefulWidget {
 
 class _TeamHomePageState extends State<TeamHomePage> {
   String currentUserName = 'You';
+  String? userAddress;
   DateTime? _lastBackPressTime;
+  List<Map<String, dynamic>> _workspaceMembers = [];
+  int _memberCount = 0;
+  bool _isLoadingMembers = true;
+  String? _inviterAddress;
 
   @override
   void initState() {
@@ -23,13 +28,32 @@ class _TeamHomePageState extends State<TeamHomePage> {
     print('🏢 Workspace Home Page initialized');
     print('📋 Workspace Name: ${widget.workspaceName}');
     print('📋 Channel Name: ${widget.channelName}');
-    _loadUserName();
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    await _loadUserAddress();
+    await _loadUserName();
+    await _loadWorkspaceMembers();
+  }
+
+  Future<void> _loadUserAddress() async {
+    try {
+      final session = await OrbitDBService.getLoginSession();
+      userAddress = session['userAddress'];
+      print('👤 User address from session: $userAddress');
+    } catch (e) {
+      print('❌ Error loading user address: $e');
+    }
   }
 
   Future<void> _loadUserName() async {
     try {
+      if (userAddress == null) {
+        await _loadUserAddress();
+      }
       print('🔍 Loading username for workspace: ${widget.workspaceName}');
-      // Load username from OrbitDB instead of SharedPreferences
+      // Load username from OrbitDB
       final username = await _getUserNameFromOrbitDB() ?? 'You';
       print('👤 Loaded username: $username');
       setState(() {
@@ -45,10 +69,12 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
   Future<String?> _getUserNameFromOrbitDB() async {
     try {
-      // This is a simplified approach - in real implementation, you'd need to pass user address
-      // For now, we'll use a default user address or get it from context
-      final userAddress = '0xc79d923c6b52b62c2b77de6ce9d1e434e3b3fe99'; // This should be passed as parameter
-      final key = userAddress.toLowerCase().trim();
+      if (userAddress == null) {
+        await _loadUserAddress();
+      }
+      if (userAddress == null) return null;
+      
+      final key = userAddress!.toLowerCase().trim();
       final dbName = 'profile_$key';
       
       print('🔍 Looking for username in database: $dbName');
@@ -72,6 +98,193 @@ class _TeamHomePageState extends State<TeamHomePage> {
       return null;
     } catch (e) {
       print('❌ Error loading username from OrbitDB: $e');
+      return null;
+    }
+  }
+
+  Future<void> _loadWorkspaceMembers() async {
+    setState(() {
+      _isLoadingMembers = true;
+    });
+
+    try {
+      // Ensure user address is loaded
+      if (userAddress == null) {
+        await _loadUserAddress();
+      }
+
+      // First, find the inviter address for this workspace
+      _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(widget.workspaceName);
+      
+      if (_inviterAddress == null) {
+        print('❌ Could not find inviter for workspace: ${widget.workspaceName}');
+        setState(() {
+          _isLoadingMembers = false;
+          _memberCount = 0;
+        });
+        return;
+      }
+
+      print('👥 Loading members for workspace: ${widget.workspaceName}');
+      final members = await OrbitDBService.getWorkspaceMembers(
+        inviterAddress: _inviterAddress!,
+        workspaceName: widget.workspaceName,
+      );
+
+      // Ensure current logged-in user is in the members list
+      if (userAddress != null) {
+        final userKey = userAddress!.toLowerCase().trim();
+        final userExists = members.any((m) => 
+          m['memberAddress']?.toString().toLowerCase() == userKey
+        );
+
+        if (!userExists) {
+          print('➕ Adding current user to members list');
+          // Get current user's display name
+          final userDisplayName = await _getUserNameFromOrbitDB();
+          
+          members.add({
+            'type': 'member',
+            'workspaceName': widget.workspaceName,
+            'inviterAddress': _inviterAddress!,
+            'memberAddress': userKey,
+            'memberDisplayName': userDisplayName,
+            'joinedAt': DateTime.now().millisecondsSinceEpoch,
+            'isCurrentUser': true,
+          });
+        }
+      }
+
+      // Fetch profile names for ALL members to ensure we have the latest names
+      print('🔄 Fetching profile names for ${members.length} members...');
+      
+      // Create a copy of members list to avoid modification during iteration
+      final updatedMembers = <Map<String, dynamic>>[];
+      
+      for (int i = 0; i < members.length; i++) {
+        final member = Map<String, dynamic>.from(members[i]); // Create a copy
+        final memberAddr = member['memberAddress']?.toString();
+        if (memberAddr != null) {
+          print('📝 Processing member ${i + 1}/${members.length}: $memberAddr');
+          
+          // Always fetch profile name to ensure we have the latest
+          final profileName = await _getProfileNameForAddress(memberAddr);
+          
+          if (profileName != null && profileName.isNotEmpty) {
+            // Update display name with profile name (prefer profile name over stored display name)
+            member['memberDisplayName'] = profileName;
+            print('✅ Updated member $memberAddr with name: $profileName');
+          } else {
+            // If no profile name found, check if we have a stored display name
+            final storedName = member['memberDisplayName']?.toString();
+            if (storedName == null || storedName.isEmpty) {
+              print('⚠️ No profile name found for member: $memberAddr (will use address)');
+              // Clear any empty display name
+              member.remove('memberDisplayName');
+            } else {
+              print('ℹ️ Using stored display name for $memberAddr: $storedName');
+            }
+          }
+        }
+        updatedMembers.add(member);
+      }
+
+      print('📊 Final members list:');
+      for (var m in updatedMembers) {
+        final addr = m['memberAddress'] ?? 'UNKNOWN';
+        final name = m['memberDisplayName'] ?? 'NO NAME';
+        print('  - $addr: $name');
+      }
+
+      if (mounted) {
+        setState(() {
+          _workspaceMembers = updatedMembers;
+          _memberCount = updatedMembers.length;
+          _isLoadingMembers = false;
+        });
+      }
+
+      print('✅ Loaded ${updatedMembers.length} members with names');
+    } catch (e) {
+      print('❌ Error loading workspace members: $e');
+      setState(() {
+        _isLoadingMembers = false;
+        _memberCount = 0;
+      });
+    }
+  }
+
+  /// Get profile name (username) for a given address
+  Future<String?> _getProfileNameForAddress(String address) async {
+    try {
+      final key = address.toLowerCase().trim();
+      final dbName = 'profile_$key';
+      print('🔍 Fetching profile name for: $address (db: $dbName)');
+      
+      // Try to get existing database first
+      var dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+      
+      // If database doesn't exist, try creating it (it might be a new profile)
+      if (dbAddress == null) {
+        print('⚠️ Profile database not found in cache, trying to create: $dbName');
+        dbAddress = await OrbitDBService.createChatDB(dbName);
+        if (dbAddress == null) {
+          print('❌ Could not create/find profile database for: $address');
+          return null;
+        }
+      }
+      
+      print('📌 Using profile database: $dbAddress');
+      final messages = await OrbitDBService.getMessages(dbAddress);
+      print('📨 Retrieved ${messages.length} messages from profile database');
+      
+      if (messages.isEmpty) {
+        print('⚠️ Profile database is empty for: $address');
+        return null;
+      }
+      
+      // Look for profile message
+      for (var message in messages) {
+        final msgType = message['type']?.toString();
+        print('🔍 Checking message: type=$msgType');
+        print('🔍 Message keys: ${message.keys.toList()}');
+        print('🔍 Full message: ${message.toString()}');
+        
+        if (msgType == 'profile') {
+          final msgUserAddress = message['userAddress']?.toString().toLowerCase().trim();
+          print('🔍 Profile message userAddress: $msgUserAddress (looking for: $key)');
+          
+          if (msgUserAddress == key) {
+            // Try multiple ways to get username
+            dynamic usernameValue = message['username'];
+            String? username;
+            
+            if (usernameValue != null) {
+              username = usernameValue.toString().trim();
+            }
+            
+            print('✅ Found profile - Username value: $usernameValue, Username string: "$username" for address: $address');
+            
+            if (username != null && username.isNotEmpty) {
+              print('✅ Returning username: $username');
+              return username;
+            } else {
+              print('⚠️ Username is null or empty in profile for: $address');
+              print('⚠️ Username value type: ${usernameValue.runtimeType}');
+            }
+          } else {
+            print('⚠️ userAddress mismatch: expected=$key, got=$msgUserAddress');
+          }
+        } else {
+          print('⚠️ Message type is not profile: $msgType');
+        }
+      }
+      
+      print('⚠️ No valid profile message found for address: $address');
+      return null;
+    } catch (e, stackTrace) {
+      print('❌ Error getting profile name for $address: $e');
+      print('Stack trace: $stackTrace');
       return null;
     }
   }
@@ -227,6 +440,59 @@ class _TeamHomePageState extends State<TeamHomePage> {
           ),
           _dmTile('$currentUserName (you)'),
           _addTeammatesTile(),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Members', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                Row(
+                  children: [
+                    if (_isLoadingMembers)
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    else
+                      Text(
+                        '$_memberCount ${_memberCount == 1 ? 'member' : 'members'}',
+                        style: const TextStyle(color: Colors.white54, fontSize: 14),
+                      ),
+                    if (!_isLoadingMembers)
+                      IconButton(
+                        icon: const Icon(Icons.refresh, color: Colors.white54, size: 18),
+                        onPressed: () {
+                          _loadWorkspaceMembers();
+                        },
+                        tooltip: 'Refresh members',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (_isLoadingMembers)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Center(
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else if (_workspaceMembers.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Center(
+                child: Text(
+                  'No members found',
+                  style: TextStyle(color: Colors.white54),
+                ),
+              ),
+            )
+          else
+            ..._workspaceMembers.map((member) => _memberTile(member)),
         ],
       ),
       floatingActionButton: FloatingActionButton(
@@ -351,6 +617,94 @@ class _TeamHomePageState extends State<TeamHomePage> {
           Text('Start here', style: TextStyle(color: Colors.black, fontSize: 13)),
         ],
       ),
+    );
+  }
+
+  Widget _memberTile(Map<String, dynamic> member) {
+    final memberAddress = member['memberAddress']?.toString() ?? '';
+    final isInviter = member['isInviter'] == true;
+    final isCurrentUser = member['isCurrentUser'] == true || 
+                         (userAddress != null && memberAddress.toLowerCase() == userAddress!.toLowerCase());
+    
+    // Get display name - prefer memberDisplayName (which should be profile name)
+    String? rawDisplayName = member['memberDisplayName']?.toString();
+    String displayName = (rawDisplayName ?? '').trim();
+    
+    // Debug logging
+    if (displayName.isEmpty) {
+      print('⚠️ Member $memberAddress has no display name, will use address');
+    } else {
+      print('✅ Member $memberAddress display name: $displayName');
+    }
+    
+    // If no display name, use a shortened address as fallback
+    final hasProfileName = displayName.isNotEmpty;
+    if (!hasProfileName) {
+      displayName = memberAddress.length > 10 
+        ? '${memberAddress.substring(0, 6)}...${memberAddress.substring(memberAddress.length - 4)}'
+        : memberAddress;
+      print('📝 Using address as fallback for $memberAddress: $displayName');
+    }
+    
+    // Add "(you)" suffix if it's the current user
+    if (isCurrentUser && !displayName.contains('(you)')) {
+      displayName = '$displayName (you)';
+    }
+    
+    // Get initial from display name (remove "(you)" for initial)
+    String nameForInitial = displayName.replaceAll('(you)', '').trim();
+    final initial = nameForInitial.isNotEmpty ? nameForInitial[0].toUpperCase() : 'M';
+
+    return ListTile(
+      leading: CircleAvatar(
+        backgroundColor: isInviter ? const Color(0xFF23C16B) : Colors.white,
+        child: Text(
+          initial,
+          style: TextStyle(
+            color: isInviter ? Colors.white : const Color(0xFF4F0E5E),
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+          ),
+        ),
+      ),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              displayName,
+              style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+            ),
+          ),
+          if (isInviter)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFF23C16B).withOpacity(0.2),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                'Admin',
+                style: TextStyle(
+                  color: Color(0xFF23C16B),
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+        ],
+      ),
+      // Only show address in subtitle if we don't have a profile name, or make it less prominent
+      subtitle: hasProfileName 
+        ? null // Hide address when we have a proper name
+        : Text(
+            memberAddress.length > 20 
+              ? '${memberAddress.substring(0, 10)}...${memberAddress.substring(memberAddress.length - 8)}'
+              : memberAddress,
+            style: const TextStyle(color: Colors.white38, fontSize: 11),
+          ),
+      onTap: () {
+        // TODO: Show member details or profile
+      },
     );
   }
 }

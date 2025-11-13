@@ -177,6 +177,35 @@ class ChannelPreviewPage extends StatelessWidget {
                       final success = await OrbitDBService.saveWorkspaceForUser(key, workspaceDetails);
                       print('Workspace save result: $success');
                       print('📌 Workspace database address cached for future use');
+                      
+                      // Add the creator as the first member (inviter) of the workspace
+                      try {
+                        // Get creator's display name from profile
+                        String? creatorDisplayName;
+                        final profileDbName = 'profile_$key';
+                        final profileDbAddress = await OrbitDBService.getExistingDatabaseAddress(profileDbName);
+                        if (profileDbAddress != null) {
+                          final profileMessages = await OrbitDBService.getMessages(profileDbAddress);
+                          for (var msg in profileMessages) {
+                            if (msg['type'] == 'profile' && msg['userAddress']?.toString().toLowerCase() == key) {
+                              creatorDisplayName = msg['username']?.toString();
+                              break;
+                            }
+                          }
+                        }
+                        
+                        await OrbitDBService.addWorkspaceMember(
+                          inviterAddress: key,
+                          memberAddress: key,
+                          workspaceName: workspaceName,
+                          memberDisplayName: creatorDisplayName,
+                        );
+                        print('✅ Creator added as workspace member');
+                      } catch (e) {
+                        print('⚠️ Failed to add creator as member: $e');
+                        // Continue anyway since workspace was saved
+                      }
+                      
                       // No need to save to SharedPreferences - all data is now in OrbitDB
                       Navigator.push(
                         context,

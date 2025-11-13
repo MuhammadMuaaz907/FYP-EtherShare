@@ -1,7 +1,16 @@
 import 'package:flutter/material.dart';
 
+import 'services/invite_service.dart';
+
 class AddByEmailPage extends StatefulWidget {
-  const AddByEmailPage({super.key});
+  final String workspaceName;
+  final String userAddress;
+
+  const AddByEmailPage({
+    super.key,
+    required this.workspaceName,
+    required this.userAddress,
+  });
 
   @override
   State<AddByEmailPage> createState() => _AddByEmailPageState();
@@ -10,6 +19,7 @@ class AddByEmailPage extends StatefulWidget {
 class _AddByEmailPageState extends State<AddByEmailPage> {
   final TextEditingController _controller = TextEditingController();
   bool _canSend = false;
+  bool _isSending = false;
 
   @override
   void initState() {
@@ -41,15 +51,21 @@ class _AddByEmailPageState extends State<AddByEmailPage> {
         ),
         actions: [
           TextButton(
-            onPressed: _canSend ? () {} : null,
-            child: Text(
-              'Send',
-              style: TextStyle(
-                color: _canSend ? Colors.white : Colors.white38,
-                fontWeight: FontWeight.w600,
-                fontSize: 16,
-              ),
-            ),
+            onPressed: (_canSend && !_isSending) ? _handleSend : null,
+            child: _isSending
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Text(
+                    'Send',
+                    style: TextStyle(
+                      color: _canSend ? Colors.white : Colors.white38,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                    ),
+                  ),
           ),
         ],
         leading: IconButton(
@@ -92,6 +108,38 @@ class _AddByEmailPageState extends State<AddByEmailPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Future<void> _handleSend() async {
+    setState(() {
+      _isSending = true;
+    });
+
+    final email = _controller.text.trim();
+    final result = await InviteService.sendWorkspaceInviteEmail(
+      recipientEmail: email,
+      workspaceName: widget.workspaceName,
+      inviterAddress: widget.userAddress,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isSending = false;
+    });
+
+    if (result.isSuccess) {
+      Navigator.pop(context, result);
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(result.message ?? 'Failed to send invitation email.'),
       ),
     );
   }

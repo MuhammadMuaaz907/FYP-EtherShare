@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:blockchain_fyp/splash.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -5,9 +7,16 @@ import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:get_it/get_it.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:app_links/app_links.dart';
+
 import 'services/contract_service.dart';
+import 'services/invite_link_manager.dart';
+import 'services/invite_service.dart';
 import 'services/ipfs_service.dart';
 import 'services/orbitdb_service.dart';
+import 'screens/accept_invite_screen.dart';
+
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   try {
@@ -81,16 +90,129 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
+  StreamSubscription<Uri>? _linkSubscription;
+  AppLinks? _appLinks;
+  bool _isHandlingInviteNavigation = false;
+
   @override
   void initState() {
     super.initState();
     _setupMethodChannel();
+    _initDeepLinks();
+  }
+
+  Future<void> _initDeepLinks() async {
+    await InviteLinkManager.instance.loadFromStorage();
+
+    _appLinks = AppLinks();
+
+    try {
+      final initialUri = await _appLinks!.getInitialAppLink();
+      if (initialUri != null) {
+        await _handleIncomingLink(initialUri);
+      }
+    } catch (e) {
+      print('Error parsing initial deep link: $e');
+    }
+
+    _linkSubscription = _appLinks!.uriLinkStream.listen(
+      (uri) {
+        _handleIncomingLink(uri);
+      },
+      onError: (err) {
+        print('Deep link stream error: $err');
+      },
+    );
+
+    _maybeNavigateToInvite();
+  }
+
+  Future<void> _handleIncomingLink(Uri uri) async {
+    if (uri.scheme.toLowerCase() != 'ethershare') {
+      return;
+    }
+
+    if (uri.host.toLowerCase() != 'invite') {
+      return;
+    }
+
+    final workspaceSlug = uri.queryParameters['workspace'] ?? '';
+    final inviter = uri.queryParameters['inviter'] ?? '';
+
+    if (workspaceSlug.isEmpty || inviter.isEmpty) {
+      return;
+    }
+
+    final invite = InviteLinkData(
+      workspaceSlug: workspaceSlug,
+      inviterAddress: inviter,
+    );
+
+    await InviteLinkManager.instance.setPendingInvite(invite);
+    await _maybeNavigateToInvite();
+  }
+
+  Future<void> _maybeNavigateToInvite() async {
+    if (_isHandlingInviteNavigation) {
+      return;
+    }
+
+    final pendingInvite = InviteLinkManager.instance.currentInvite;
+    if (pendingInvite == null) {
+      return;
+    }
+
+    final session = await OrbitDBService.getLoginSession();
+    if (session['isLoggedIn'] != 'true') {
+      return;
+    }
+
+    final userAddress = session['userAddress'];
+    if (userAddress == null || userAddress.isEmpty) {
+      return;
+    }
+
+    if (rootNavigatorKey.currentState == null) {
+      return;
+    }
+
+    _isHandlingInviteNavigation = true;
+
+    final resolved = await InviteService.resolveInvite(pendingInvite);
+
+    if (resolved == null) {
+      await InviteLinkManager.instance.clearPendingInvite();
+      _isHandlingInviteNavigation = false;
+      return;
+    }
+
+    if (!mounted) {
+      _isHandlingInviteNavigation = false;
+      return;
+    }
+
+    rootNavigatorKey.currentState!.push(
+      MaterialPageRoute(
+        builder: (_) => AcceptInviteScreen(
+          invite: resolved,
+          userAddress: userAddress,
+          onComplete: () async {
+            await InviteLinkManager.instance.clearPendingInvite();
+            _isHandlingInviteNavigation = false;
+          },
+          onCancel: () async {
+            _isHandlingInviteNavigation = false;
+          },
+        ),
+        fullscreenDialog: true,
+      ),
+    );
   }
 
   void _setupMethodChannel() {
     // Initialize MethodChannel for OrbitDB Bridge
     const MethodChannel channel = MethodChannel('orbitdb_channel');
-    
+
     // Set up method call handler for real-time updates
     channel.setMethodCallHandler((call) async {
       switch (call.method) {
@@ -125,6 +247,7 @@ class _MyAppState extends State<MyApp> {
       },
       initialData: null,
       child: MaterialApp(
+        navigatorKey: rootNavigatorKey,
         title: 'FYP - Secure File Sharing',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
@@ -151,6 +274,13 @@ class _MyAppState extends State<MyApp> {
         },
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _linkSubscription?.cancel();
+    _appLinks = null;
+    super.dispose();
   }
 }
 

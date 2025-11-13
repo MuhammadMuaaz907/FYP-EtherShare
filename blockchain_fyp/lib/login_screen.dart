@@ -9,6 +9,11 @@ import 'services/orbitdb_service.dart';
 import 'private_key_login_screen.dart';
 import 'workspace_home_page.dart';
 import 'dart:convert'; // Added for jsonDecode
+import 'services/invite_link_manager.dart';
+import 'services/invite_service.dart';
+import 'screens/accept_invite_screen.dart';
+import 'services/secure_storage_service.dart';
+import 'screens/verify_2fa_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -124,9 +129,65 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
             print('  - hasProfile: $hasProfile');
             print('  - workspaceExists: $workspaceExists');
             
-            // If user is registered, has profile, and has workspace, go to workspace
+            // If user is registered, has profile, and has workspace, check 2FA first
             if (isRegistered && hasProfile && workspaceExists) {
-              print('✅ All checks passed - redirecting to workspace');
+              print('✅ All checks passed - checking 2FA status...');
+              
+              // Check if 2FA is enabled
+              SecureStorageService? storageService;
+              bool is2FAEnabled = false;
+              try {
+                storageService = await SecureStorageService.create();
+                is2FAEnabled = await storageService.isUser2FAEnabled();
+                print('🔐 2FA Status: ${is2FAEnabled ? "ENABLED" : "DISABLED"}');
+              } catch (e) {
+                print('⚠️ Error checking 2FA status: $e');
+              }
+              
+              // If 2FA is enabled, navigate to verification screen
+              if (is2FAEnabled) {
+                print('🔐 2FA is enabled - navigating to verification screen');
+                setState(() {
+                  _status = '2FA verification required...';
+                  _isLoading = false;
+                });
+                
+                if (mounted) {
+                  // Get user email from profile
+                  String? userEmail;
+                  try {
+                    final key = address.toLowerCase().trim();
+                    final dbName = 'profile_$key';
+                    final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+                    if (dbAddress != null) {
+                      final messages = await OrbitDBService.getMessages(dbAddress);
+                      for (var message in messages) {
+                        if (message['type'] == 'profile' && message['userAddress'] == key) {
+                          userEmail = message['email']?.toString();
+                          break;
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    print('Error fetching user email: $e');
+                  }
+                  
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => Verify2FAScreen(
+                        userId: address,
+                        userAddress: address,
+                        userEmail: userEmail,
+                      ),
+                    ),
+                  );
+                }
+                return;
+              }
+              
+              // If 2FA is not enabled, proceed to workspace
+              print('✅ 2FA not enabled - redirecting to workspace');
               setState(() {
                 _status = 'Login successful! Redirecting to workspace...';
                 _isLoading = false;
@@ -160,6 +221,29 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 
                 // Save login session to persistent storage
                 await OrbitDBService.saveLoginSession(address, workspaceName, channelName);
+
+                final pendingInvite =
+                    await InviteLinkManager.instance.consumePendingInvite();
+
+                if (pendingInvite != null) {
+                  final resolved =
+                      await InviteService.resolveInvite(pendingInvite);
+                  if (resolved != null && mounted) {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => AcceptInviteScreen(
+                          invite: resolved,
+                          userAddress: address,
+                          onComplete: () async {
+                            await InviteLinkManager.instance.clearPendingInvite();
+                          },
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+                }
                 
                 Navigator.pushReplacement(
                   context,

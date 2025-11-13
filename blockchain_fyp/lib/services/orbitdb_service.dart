@@ -341,21 +341,33 @@ class OrbitDBService {
   // Upload file to IPFS - Uses Android Bridge
   static Future<Map<String, dynamic>?> uploadFile(String workspaceId, String fileName, Uint8List fileData) async {
     try {
-      print('📎 Uploading file via Android Bridge: $fileName (${fileData.length} bytes)');
+      final fileSizeMB = (fileData.length / 1024 / 1024).toStringAsFixed(2);
+      print('📎 Uploading file via Android Bridge: $fileName (${fileSizeMB} MB)');
       
       // Create a temporary file to upload
       final tempDir = Directory.systemTemp;
       final tempFile = File('${tempDir.path}/$fileName');
       await tempFile.writeAsBytes(fileData);
       
-      // Use IPFS service for file upload
+      // Use IPFS service for file upload (with fallback mechanism)
       final ipfsService = IPFSService();
       final cid = await ipfsService.uploadFileToIPFS(tempFile);
       
       // Clean up temp file
-      await tempFile.delete();
+      try {
+        await tempFile.delete();
+      } catch (e) {
+        print('⚠️ Could not delete temp file: $e');
+      }
       
       if (cid.isNotEmpty) {
+        print('✅ File uploaded to IPFS successfully. CID: $cid');
+        
+        // Optionally pin the file (non-blocking)
+        ipfsService.pinFile(cid).catchError((e) {
+          print('⚠️ Could not pin file (non-critical): $e');
+        });
+        
         // Store file reference in OrbitDB
         final fileMessage = {
           'type': 'file',
@@ -371,6 +383,9 @@ class OrbitDBService {
         final address = await createChatDB(dbName);
         if (address != null) {
           await addMessage(address, fileMessage);
+          print('✅ File reference saved to OrbitDB');
+        } else {
+          print('⚠️ Could not save file reference to OrbitDB (database not found)');
         }
         
         return {
@@ -381,22 +396,31 @@ class OrbitDBService {
           'messageId': 'msg_${DateTime.now().millisecondsSinceEpoch}'
         };
       } else {
-        return null;
+        print('❌ File upload failed - no CID returned');
+        return {
+          'success': false,
+          'error': 'IPFS upload failed. Please check IPFS connection.',
+        };
       }
     } catch (e) {
       print('❌ Error uploading file: $e');
-      return null;
+      return {
+        'success': false,
+        'error': 'Upload error: $e',
+      };
     }
   }
 
   // Download file from IPFS - Uses real IPFS service with fallback mechanism
   static Future<Uint8List?> downloadFile(String cid) async {
-    // Fallback URLs in order of preference
+    // Fallback URLs in order of preference (matching IPFS Desktop config)
+    // Gateway: http://127.0.0.1:8081 (from IPFS Desktop config)
+    // Public Gateways: https://dweb.link and https://ipfs.io (from IPFS Desktop config)
     final List<String> gatewayUrls = [
-      'http://127.0.0.1:8081/ipfs/',      // Local IPFS Desktop gateway (localhost)
-      'http://192.168.0.37:8081/ipfs/',   // Local IPFS Desktop gateway (network IP)
-      'https://dweb.link/ipfs/',          // Public gateway 1 (fast)
-      'https://ipfs.io/ipfs/',            // Public gateway 2 (reliable)
+      'http://127.0.0.1:8081/ipfs/',      // Primary: Local IPFS Desktop gateway (localhost) - from config
+      'http://192.168.0.39:8081/ipfs/',   // Fallback: Local IPFS Desktop gateway (network IP)
+      'https://dweb.link/ipfs/',          // Public gateway 1 (from IPFS Desktop config - fast)
+      'https://ipfs.io/ipfs/',            // Public gateway 2 (from IPFS Desktop config - reliable)
       'https://gateway.pinata.cloud/ipfs/', // Public gateway 3 (backup)
     ];
     
@@ -589,6 +613,211 @@ class OrbitDBService {
     } catch (e) {
       print('❌ Error getting channel messages: $e');
       return [];
+    }
+  }
+
+  // ============ WORKSPACE MEMBER MANAGEMENT ============
+
+  /// Add a member to a workspace
+  /// [inviterAddress] is the address of the workspace creator/inviter
+  /// [memberAddress] is the address of the member being added
+  /// [workspaceName] is the name of the workspace
+  /// [memberDisplayName] is optional display name for the member
+  static Future<bool> addWorkspaceMember({
+    required String inviterAddress,
+    required String memberAddress,
+    required String workspaceName,
+    String? memberDisplayName,
+  }) async {
+    try {
+      print('👤 Adding member to workspace: $memberAddress');
+      
+      final inviterKey = inviterAddress.toLowerCase().trim();
+      final memberKey = memberAddress.toLowerCase().trim();
+      
+      // Use the inviter's workspace database to store members
+      final dbName = 'workspace_$inviterKey';
+      final address = await createChatDB(dbName);
+      
+      if (address == null) {
+        print('❌ Failed to get workspace database for inviter: $inviterKey');
+        return false;
+      }
+      
+      // Check if member already exists
+      final existingMembers = await getWorkspaceMembers(
+        inviterAddress: inviterAddress,
+        workspaceName: workspaceName,
+      );
+      
+      final memberExists = existingMembers.any((m) => 
+        m['memberAddress']?.toString().toLowerCase() == memberKey
+      );
+      
+      if (memberExists) {
+        print('ℹ️ Member already exists in workspace');
+        return true; // Already a member, return success
+      }
+      
+      // Add member as a message
+      final memberMessage = {
+        'type': 'member',
+        'workspaceName': workspaceName,
+        'inviterAddress': inviterKey,
+        'memberAddress': memberKey,
+        'memberDisplayName': memberDisplayName,
+        'joinedAt': DateTime.now().millisecondsSinceEpoch,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      };
+      
+      final result = await addMessage(address, memberMessage);
+      print('✅ Member added with result: $result');
+      return result != null;
+    } catch (e) {
+      print('❌ Error adding workspace member: $e');
+      return false;
+    }
+  }
+
+  /// Get all members of a workspace
+  /// [inviterAddress] is the address of the workspace creator/inviter
+  /// [workspaceName] is the name of the workspace
+  static Future<List<Map<String, dynamic>>> getWorkspaceMembers({
+    required String inviterAddress,
+    required String workspaceName,
+  }) async {
+    try {
+      print('👥 Getting workspace members for: $workspaceName');
+      
+      final inviterKey = inviterAddress.toLowerCase().trim();
+      final dbName = 'workspace_$inviterKey';
+      final dbAddress = await getExistingDatabaseAddress(dbName);
+      
+      if (dbAddress == null) {
+        print('❌ Workspace database not found: $dbName');
+        return [];
+      }
+      
+      final messages = await getMessages(dbAddress);
+      final members = <Map<String, dynamic>>[];
+      
+      // Get all member messages for this workspace
+      for (var message in messages) {
+        if (message['type'] == 'member' && 
+            message['workspaceName']?.toString().toLowerCase() == workspaceName.toLowerCase().trim()) {
+          members.add(message);
+        }
+      }
+      
+      // Also include the inviter as a member if not already in the list
+      final inviterExists = members.any((m) => 
+        m['memberAddress']?.toString().toLowerCase() == inviterKey
+      );
+      
+      if (!inviterExists) {
+        // Try to get inviter's display name from profile
+        String? inviterDisplayName;
+        try {
+          final profileDbName = 'profile_$inviterKey';
+          final profileDbAddress = await getExistingDatabaseAddress(profileDbName);
+          if (profileDbAddress != null) {
+            final profileMessages = await getMessages(profileDbAddress);
+            for (var msg in profileMessages) {
+              if (msg['type'] == 'profile' && msg['userAddress']?.toString().toLowerCase() == inviterKey) {
+                inviterDisplayName = msg['username']?.toString();
+                break;
+              }
+            }
+          }
+        } catch (e) {
+          print('⚠️ Could not fetch inviter profile: $e');
+        }
+        
+        members.add({
+          'type': 'member',
+          'workspaceName': workspaceName,
+          'inviterAddress': inviterKey,
+          'memberAddress': inviterKey,
+          'memberDisplayName': inviterDisplayName,
+          'joinedAt': DateTime.now().millisecondsSinceEpoch,
+          'isInviter': true,
+        });
+      }
+      
+      print('✅ Retrieved ${members.length} members for workspace: $workspaceName');
+      return members;
+    } catch (e) {
+      print('❌ Error getting workspace members: $e');
+      return [];
+    }
+  }
+
+  /// Get member count for a workspace
+  static Future<int> getWorkspaceMemberCount({
+    required String inviterAddress,
+    required String workspaceName,
+  }) async {
+    try {
+      final members = await getWorkspaceMembers(
+        inviterAddress: inviterAddress,
+        workspaceName: workspaceName,
+      );
+      return members.length;
+    } catch (e) {
+      print('❌ Error getting workspace member count: $e');
+      return 0;
+    }
+  }
+
+  /// Get inviter address from workspace name
+  /// This searches all workspace databases to find which inviter owns this workspace
+  static Future<String?> getInviterAddressForWorkspace(String workspaceName) async {
+    try {
+      print('🔍 Finding inviter for workspace: $workspaceName');
+      
+      // Load all database addresses
+      await _loadDatabaseAddresses();
+      
+      // Search through all workspace databases
+      for (var entry in _databaseAddresses.entries) {
+        if (entry.key.startsWith('workspace_')) {
+          try {
+            final messages = await getMessages(entry.value);
+            for (var message in messages) {
+              if (message['type'] == 'workspace') {
+                final details = message['workspaceDetails'];
+                Map<String, dynamic>? parsed;
+                if (details is String) {
+                  try {
+                    parsed = jsonDecode(details) as Map<String, dynamic>;
+                  } catch (_) {
+                    continue;
+                  }
+                } else if (details is Map) {
+                  parsed = Map<String, dynamic>.from(details);
+                }
+                
+                if (parsed?['workspaceName']?.toString().toLowerCase() == workspaceName.toLowerCase().trim()) {
+                  final inviterAddress = message['userAddress']?.toString();
+                  if (inviterAddress != null) {
+                    print('✅ Found inviter: $inviterAddress');
+                    return inviterAddress;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            print('⚠️ Error checking database ${entry.key}: $e');
+            continue;
+          }
+        }
+      }
+      
+      print('❌ Inviter not found for workspace: $workspaceName');
+      return null;
+    } catch (e) {
+      print('❌ Error finding inviter for workspace: $e');
+      return null;
     }
   }
 }

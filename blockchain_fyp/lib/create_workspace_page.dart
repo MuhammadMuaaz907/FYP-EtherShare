@@ -1,9 +1,20 @@
 import 'package:flutter/material.dart';
+
+import 'screens/accept_invite_screen.dart';
+import 'services/invite_link_manager.dart';
+import 'services/invite_service.dart';
 import 'workspace_name_page.dart';
 
-class CreateWorkspacePage extends StatelessWidget {
+class CreateWorkspacePage extends StatefulWidget {
   final String userAddress;
   const CreateWorkspacePage({super.key, required this.userAddress});
+
+  @override
+  State<CreateWorkspacePage> createState() => _CreateWorkspacePageState();
+}
+
+class _CreateWorkspacePageState extends State<CreateWorkspacePage> {
+  bool _isJoining = false;
 
   @override
   Widget build(BuildContext context) {
@@ -24,13 +35,12 @@ class CreateWorkspacePage extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Rocket illustration
               Padding(
                 padding: const EdgeInsets.only(top: 24, bottom: 16),
                 child: Icon(
-                  Icons.rocket_launch, 
-                  size: 120, 
-                  color: Colors.white24
+                  Icons.rocket_launch,
+                  size: 120,
+                  color: Colors.white24,
                 ),
               ),
               const SizedBox(height: 12),
@@ -59,17 +69,42 @@ class CreateWorkspacePage extends StatelessWidget {
                   onPressed: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => WorkspaceNamePage(userAddress: userAddress)),
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            WorkspaceNamePage(userAddress: widget.userAddress),
+                      ),
                     );
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Color(0xFF23C16B),
+                    backgroundColor: const Color(0xFF23C16B),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
-                    textStyle: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    textStyle:
+                        const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
                   ),
                   child: const Text('Create a workspace'),
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: 280,
+                child: OutlinedButton(
+                  onPressed: _isJoining ? null : _handleJoinExistingWorkspace,
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    side: const BorderSide(color: Colors.white30, width: 1.2),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: _isJoining
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Join an existing workspace'),
                 ),
               ),
               const SizedBox(height: 36),
@@ -88,7 +123,11 @@ class CreateWorkspacePage extends StatelessWidget {
                       },
                       child: const Text(
                         'try another email address.',
-                        style: TextStyle(color: Colors.lightBlueAccent, fontSize: 14, decoration: TextDecoration.underline),
+                        style: TextStyle(
+                          color: Colors.lightBlueAccent,
+                          fontSize: 14,
+                          decoration: TextDecoration.underline,
+                        ),
                       ),
                     ),
                   ],
@@ -100,4 +139,105 @@ class CreateWorkspacePage extends StatelessWidget {
       ),
     );
   }
-} 
+
+  Future<void> _handleJoinExistingWorkspace() async {
+    final textController = TextEditingController();
+    final link = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Join workspace'),
+          content: TextField(
+            controller: textController,
+            autofocus: true,
+            minLines: 1,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              hintText: 'https://ethershare.app/invite?...',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, textController.text.trim()),
+              child: const Text('Continue'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!mounted || link == null || link.isEmpty) {
+      return;
+    }
+
+    final parsed = InviteLinkManager.parseLink(link);
+    if (parsed == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Ye link valid nahin lag raha.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isJoining = true;
+    });
+
+    try {
+      await InviteLinkManager.instance.setPendingInvite(parsed);
+      final resolved = await InviteService.resolveInvite(parsed);
+
+      if (!mounted) {
+        return;
+      }
+
+      if (resolved == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Ye invite abhi kaam nahin kar raha. Admin se link dobara mang lo.'),
+          ),
+        );
+        setState(() {
+          _isJoining = false;
+        });
+        return;
+      }
+
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => AcceptInviteScreen(
+            invite: resolved,
+            userAddress: widget.userAddress,
+            onComplete: () async {
+              await InviteLinkManager.instance.clearPendingInvite();
+              if (mounted) {
+                setState(() {
+                  _isJoining = false;
+                });
+              }
+            },
+            onCancel: () async {
+              if (mounted) {
+                setState(() {
+                  _isJoining = false;
+                });
+              }
+            },
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isJoining = false;
+        });
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 package com.example.blockchain_fyp
 
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodCall
@@ -15,7 +15,7 @@ import java.util.concurrent.Executors
 import org.json.JSONArray
 import org.json.JSONObject
 
-class MainActivity : FlutterActivity(), MethodCallHandler {
+class MainActivity : FlutterFragmentActivity(), MethodCallHandler {
     private val CHANNEL = "orbitdb_channel"
     private val TAG = "MainActivity"
     private var methodChannel: MethodChannel? = null
@@ -95,8 +95,29 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
     private fun createChatDB(name: String, result: Result) {
         executor.execute {
             try {
-                // Create a unique address for the database
-                val address = "db_${name}_${System.currentTimeMillis()}"
+                // Check if database already exists for this name (consistent addressing)
+                val dbAddressKey = "db_address_$name"
+                val existingAddress = sharedPreferences.getString(dbAddressKey, null)
+                
+                if (existingAddress != null) {
+                    // Database already exists, return the same address
+                    Log.d(TAG, "📌 Using existing database address for '$name': $existingAddress")
+                    result.success(mapOf(
+                        "success" to true,
+                        "address" to existingAddress,
+                        "message" to "Chat database '$name' already exists"
+                    ))
+                    return@execute
+                }
+                
+                // Create a new consistent address for the database (without timestamp for consistency)
+                // Use a hash of the name to ensure same name = same address
+                val address = "db_${name}_${name.hashCode().toString().replace("-", "n")}"
+                
+                // Store the address mapping for future use
+                sharedPreferences.edit()
+                    .putString(dbAddressKey, address)
+                    .apply()
                 
                 // Initialize empty messages array for this database
                 val messagesKey = "messages_$address"
@@ -104,7 +125,8 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
                     .putString(messagesKey, JSONArray().toString())
                     .apply()
                 
-                Log.d(TAG, "Chat DB created: $address")
+                Log.d(TAG, "✅ Chat DB created: $address for name: $name")
+                Log.d(TAG, "📌 Stored address mapping: $name -> $address")
                 
                 result.success(mapOf(
                     "success" to true,
@@ -112,10 +134,11 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
                     "message" to "Chat database '$name' created successfully"
                 ))
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to create chat DB", e)
+                Log.e(TAG, "❌ Failed to create chat DB", e)
+                e.printStackTrace()
                 result.success(mapOf(
                     "success" to false,
-                    "error" to e.message
+                    "error" to (e.message ?: "Unknown error")
                 ))
             }
         }
@@ -128,21 +151,44 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
                 val messagesJson = sharedPreferences.getString(messagesKey, "[]") ?: "[]"
                 val messagesArray = JSONArray(messagesJson)
                 
-                // Add timestamp to message
-                val messageWithTimestamp = message.toMutableMap() as MutableMap<String, Any>
-                messageWithTimestamp["timestamp"] = System.currentTimeMillis()
-                messageWithTimestamp["id"] = "msg_${System.currentTimeMillis()}"
+                // Create a new map preserving ALL fields from the original message
+                val messageWithMetadata = message.toMutableMap()
                 
-                messagesArray.put(JSONObject(messageWithTimestamp as Map<String, Any>))
+                // Only add id and timestamp if they don't already exist
+                if (!messageWithMetadata.containsKey("id")) {
+                    messageWithMetadata["id"] = "msg_${System.currentTimeMillis()}_${(0..9999).random()}"
+                }
+                if (!messageWithMetadata.containsKey("timestamp")) {
+                    messageWithMetadata["timestamp"] = System.currentTimeMillis()
+                }
+                
+                // Log the complete message being saved
+                Log.d(TAG, "Saving message to $address:")
+                Log.d(TAG, "  Type: ${messageWithMetadata["type"]}")
+                Log.d(TAG, "  Username: ${messageWithMetadata["username"] ?: messageWithMetadata["senderName"] ?: "null"}")
+                Log.d(TAG, "  SenderName: ${messageWithMetadata["senderName"] ?: "null"}")
+                Log.d(TAG, "  Sender: ${messageWithMetadata["sender"] ?: "null"}")
+                Log.d(TAG, "  Email: ${messageWithMetadata["email"] ?: "null"}")
+                Log.d(TAG, "  UserAddress: ${messageWithMetadata["userAddress"] ?: "null"}")
+                Log.d(TAG, "  Content: ${messageWithMetadata["content"]?.toString()?.take(50) ?: "null"}")
+                Log.d(TAG, "  Full message keys: ${messageWithMetadata.keys}")
+                
+                // Convert to JSONObject - this preserves all fields
+                val messageJson = JSONObject()
+                for ((key, value) in messageWithMetadata) {
+                    messageJson.put(key, value)
+                }
+                
+                messagesArray.put(messageJson)
                 
                 // Save updated messages
                 sharedPreferences.edit()
                     .putString(messagesKey, messagesArray.toString())
                     .apply()
                 
-                val messageId = messageWithTimestamp["id"] as String
+                val messageId = messageWithMetadata["id"] as String
                 val hash = "hash_${System.currentTimeMillis()}"
-                Log.d(TAG, "Message added: $messageId")
+                Log.d(TAG, "✅ Message added successfully: $messageId")
                 
                 result.success(mapOf(
                     "success" to true,
@@ -151,10 +197,11 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
                     "message" to "Message added successfully"
                 ))
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to add message", e)
+                Log.e(TAG, "❌ Failed to add message", e)
+                e.printStackTrace()
                 result.success(mapOf(
                     "success" to false,
-                    "error" to e.message
+                    "error" to (e.message ?: "Unknown error")
                 ))
             }
         }
@@ -175,12 +222,60 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
                     val keys = messageObj.keys()
                     while (keys.hasNext()) {
                         val key = keys.next()
-                        messageMap[key] = messageObj.get(key)
+                        val value = messageObj.get(key)
+                        
+                        // Handle JSONArray and JSONObject - convert to Flutter-compatible types
+                        when (value) {
+                            is org.json.JSONArray -> {
+                                // Convert JSONArray to List<String>
+                                val list = mutableListOf<Any>()
+                                for (j in 0 until value.length()) {
+                                    val item = value.get(j)
+                                    when (item) {
+                                        is org.json.JSONObject -> {
+                                            // Convert JSONObject to Map
+                                            val itemMap = mutableMapOf<String, Any>()
+                                            val itemKeys = item.keys()
+                                            while (itemKeys.hasNext()) {
+                                                val itemKey = itemKeys.next()
+                                                itemMap[itemKey] = item.get(itemKey)
+                                            }
+                                            list.add(itemMap)
+                                        }
+                                        else -> list.add(item)
+                                    }
+                                }
+                                messageMap[key] = list
+                            }
+                            is org.json.JSONObject -> {
+                                // Convert JSONObject to Map
+                                val nestedMap = mutableMapOf<String, Any>()
+                                val nestedKeys = value.keys()
+                                while (nestedKeys.hasNext()) {
+                                    val nestedKey = nestedKeys.next()
+                                    nestedMap[nestedKey] = value.get(nestedKey)
+                                }
+                                messageMap[key] = nestedMap
+                            }
+                            else -> {
+                                messageMap[key] = value
+                            }
+                        }
                     }
                     messages.add(messageMap)
                 }
                 
-                Log.d(TAG, "Retrieved ${messages.size} messages")
+                Log.d(TAG, "📨 Retrieved ${messages.size} messages from $address")
+                
+                // Log sample messages for debugging
+                if (messages.isNotEmpty()) {
+                    val sampleMsg = messages[0]
+                    Log.d(TAG, "📄 Sample message keys: ${sampleMsg.keys}")
+                    Log.d(TAG, "📄 Sample message type: ${sampleMsg["type"]}")
+                    Log.d(TAG, "📄 Sample message username: ${sampleMsg["username"] ?: sampleMsg["senderName"] ?: "null"}")
+                    Log.d(TAG, "📄 Sample message senderName: ${sampleMsg["senderName"] ?: "null"}")
+                    Log.d(TAG, "📄 Sample message userAddress: ${sampleMsg["userAddress"] ?: "null"}")
+                }
                 
                 result.success(mapOf(
                     "success" to true,
@@ -188,10 +283,11 @@ class MainActivity : FlutterActivity(), MethodCallHandler {
                     "count" to messages.size
                 ))
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to get messages", e)
+                Log.e(TAG, "❌ Failed to get messages", e)
+                e.printStackTrace()
                 result.success(mapOf(
                     "success" to false,
-                    "error" to e.message
+                    "error" to (e.message ?: "Unknown error")
                 ))
             }
         }

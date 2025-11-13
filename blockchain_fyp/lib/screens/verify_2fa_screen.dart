@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
+import 'dart:convert';
 import '../services/email_otp_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/biometric_service.dart';
+import '../services/orbitdb_service.dart';
+import '../services/invite_link_manager.dart';
+import '../services/invite_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import '../home_screen.dart';
+import '../workspace_home_page.dart';
+import 'accept_invite_screen.dart';
 
 /// Comprehensive 2FA Verification Screen with Email OTP
 /// 
@@ -440,13 +446,21 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
 
   Future<void> _authenticateWithBiometric() async {
     if (!_biometricAvailable || !_biometricEnabled) {
-      setState(() => _status = 'Biometric authentication is not available');
+      setState(() => _status = 'Biometric authentication is not available. Please use OTP verification.');
+      // Automatically switch to OTP screen if biometric is not available
+      Future.delayed(const Duration(seconds: 1), () {
+        _goToOTPScreen();
+      });
       return;
     }
 
     if (_isLocked && _lockoutUntil != null && DateTime.now().isBefore(_lockoutUntil!)) {
       final remainingTime = _lockoutUntil!.difference(DateTime.now()).inMinutes;
       setState(() => _status = 'Too many failed attempts. Please try again in $remainingTime minutes.');
+      // Switch to OTP as fallback
+      Future.delayed(const Duration(seconds: 1), () {
+        _goToOTPScreen();
+      });
       return;
     } else if (_isLocked) {
       // Reset lockout if time has passed
@@ -470,15 +484,36 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
         await _handleFailedAttempt();
         setState(() {
           _isLoading = false;
-          _status = 'Biometric authentication failed';
+          _status = 'Biometric authentication failed. Please use OTP verification.';
+        });
+        // Switch to OTP screen as fallback
+        Future.delayed(const Duration(seconds: 1), () {
+          _goToOTPScreen();
         });
       }
     } catch (e) {
-      await _handleFailedAttempt();
-      setState(() {
-        _isLoading = false;
-        _status = 'Error with biometric authentication: $e';
-      });
+      print('⚠️ Biometric authentication error: $e');
+      // If biometric fails due to FragmentActivity issue, gracefully fallback to OTP
+      if (e.toString().contains('FragmentActivity') || e.toString().contains('no_fragment_activity')) {
+        setState(() {
+          _isLoading = false;
+          _status = 'Biometric authentication unavailable. Switching to OTP verification...';
+        });
+        // Automatically switch to OTP screen
+        Future.delayed(const Duration(seconds: 1), () {
+          _goToOTPScreen();
+        });
+      } else {
+        await _handleFailedAttempt();
+        setState(() {
+          _isLoading = false;
+          _status = 'Biometric authentication error. Please use OTP verification.';
+        });
+        // Switch to OTP screen as fallback
+        Future.delayed(const Duration(seconds: 1), () {
+          _goToOTPScreen();
+        });
+      }
     }
   }
 
@@ -517,12 +552,82 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
     }
   }
 
-  void _navigateToHome() {
+  Future<void> _navigateToHome() async {
     if (mounted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
-      );
+      try {
+        // Fetch workspace details from OrbitDB
+        String workspaceName = 'YourWorkspace';
+        String channelName = 'general';
+        
+        try {
+          final key = widget.userAddress.toLowerCase().trim();
+          final dbName = 'workspace_$key';
+          final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+          
+          if (dbAddress != null) {
+            final messages = await OrbitDBService.getMessages(dbAddress);
+            
+            // Find workspace message for this user
+            for (var message in messages) {
+              if (message['type'] == 'workspace' && message['userAddress'] == key) {
+                final workspaceDetails = jsonDecode(message['workspaceDetails']);
+                workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
+                channelName = workspaceDetails['channelName'] ?? channelName;
+                break;
+              }
+            }
+          }
+        } catch (e) {
+          print('Error fetching workspace details: $e');
+        }
+        
+        // Save login session to persistent storage
+        await OrbitDBService.saveLoginSession(widget.userAddress, workspaceName, channelName);
+        
+        // Check for pending invites
+        final pendingInvite = await InviteLinkManager.instance.consumePendingInvite();
+        
+        if (pendingInvite != null) {
+          final resolved = await InviteService.resolveInvite(pendingInvite);
+          if (resolved != null && mounted) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => AcceptInviteScreen(
+                  invite: resolved,
+                  userAddress: widget.userAddress,
+                  onComplete: () async {
+                    await InviteLinkManager.instance.clearPendingInvite();
+                  },
+                ),
+              ),
+            );
+            return;
+          }
+        }
+        
+        // Navigate to workspace home page
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => TeamHomePage(
+                workspaceName: workspaceName,
+                channelName: channelName,
+              ),
+            ),
+          );
+        }
+      } catch (e) {
+        print('Error navigating to workspace: $e');
+        // Fallback to home screen if workspace navigation fails
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const HomeScreen()),
+          );
+        }
+      }
     }
   }
 

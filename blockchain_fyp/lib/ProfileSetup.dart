@@ -99,24 +99,38 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       // Create the database first (this will store the address in cache)
       final dbAddress = await OrbitDBService.createChatDB(dbName);
       
-      print('💾 Saving profile to database: $dbAddress');
-      
-      if (dbAddress != null) {
-        final profileMessage = {
-          'type': 'profile',
-          'userAddress': key,
-          'username': _usernameController.text.trim(),
-          'email': _emailController.text.trim(),
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        };
+        print('💾 Saving profile to database: $dbAddress');
+        print('📝 Database name: $dbName');
+        print('📝 User address: $key');
+        print('📝 Username: ${_usernameController.text.trim()}');
+        print('📝 Email: ${_emailController.text.trim()}');
         
-        print('📋 Profile message: $profileMessage');
-        
-        final result = await OrbitDBService.addMessage(dbAddress, profileMessage);
-        
-        if (result != null) {
-          print('✅ Profile saved successfully with hash: $result');
-          print('📌 Database address cached for future use: $dbAddress');
+        if (dbAddress != null) {
+          final profileMessage = {
+            'type': 'profile',
+            'userAddress': key,
+            'username': _usernameController.text.trim(),
+            'email': _emailController.text.trim(),
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          };
+          
+          print('📋 Profile message to save: $profileMessage');
+          print('📋 Profile message keys: ${profileMessage.keys.toList()}');
+          
+          final result = await OrbitDBService.addMessage(dbAddress, profileMessage);
+          
+          if (result != null) {
+            print('✅ Profile saved successfully with hash: $result');
+            print('📌 Database address cached for future use: $dbAddress');
+            print('📌 Database name: $dbName');
+            
+            // Verify the save by immediately reading it back
+            print('🔍 Verifying profile save...');
+            final verifyMessages = await OrbitDBService.getMessages(dbAddress);
+            print('📨 Retrieved ${verifyMessages.length} messages after save');
+            for (var msg in verifyMessages) {
+              print('📄 Message: type=${msg['type']}, userAddress=${msg['userAddress']}, username=${msg['username']}');
+            }
           
           // Also save to SharedPreferences for backward compatibility
           final prefs = await SharedPreferences.getInstance();
@@ -260,30 +274,114 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   }
 
   Future<void> _setup2FA() async {
-    try {
-      final email = _emailController.text.trim();
-      
-      // Validate email before setting up 2FA
-      if (!_validateEmail(email)) {
-        setState(() {
-          _status = _emailError ?? 'Please enter a valid email address';
-        });
-        return;
-      }
-      
-      // Pass email to Setup2FAScreen
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => Setup2FAScreen(
-            userId: widget.address,
-            preFilledEmail: email,
-          ),
-        ),
-      );
-    } catch (e) {
+    // Validate username first
+    if (_usernameController.text.trim().isEmpty) {
       setState(() {
-        _status = 'Error setting up 2FA: $e';
+        _status = 'Please enter your name before setting up 2FA';
+      });
+      return;
+    }
+
+    final email = _emailController.text.trim();
+    
+    // Validate email before setting up 2FA
+    if (!_validateEmail(email)) {
+      setState(() {
+        _status = _emailError ?? 'Please enter a valid email address';
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _status = 'Saving profile and setting up 2FA...';
+    });
+
+    try {
+      // First, save the profile to OrbitDB (same as _saveProfile but without navigation)
+      final key = widget.address.toLowerCase().trim();
+      final dbName = 'profile_$key';
+      
+      print('💾 [2FA Flow] Saving profile before 2FA setup...');
+      print('📝 [2FA Flow] Database name: $dbName');
+      print('📝 [2FA Flow] Username: ${_usernameController.text.trim()}');
+      print('📝 [2FA Flow] Email: $email');
+      
+      // Create the database first
+      final dbAddress = await OrbitDBService.createChatDB(dbName);
+      
+      if (dbAddress != null) {
+        final profileMessage = {
+          'type': 'profile',
+          'userAddress': key,
+          'username': _usernameController.text.trim(),
+          'email': email,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        };
+        
+        print('📋 [2FA Flow] Profile message to save: $profileMessage');
+        
+        final result = await OrbitDBService.addMessage(dbAddress, profileMessage);
+        
+        if (result != null) {
+          print('✅ [2FA Flow] Profile saved successfully with hash: $result');
+          
+          // Verify the save
+          print('🔍 [2FA Flow] Verifying profile save...');
+          final verifyMessages = await OrbitDBService.getMessages(dbAddress);
+          print('📨 [2FA Flow] Retrieved ${verifyMessages.length} messages after save');
+          for (var msg in verifyMessages) {
+            print('📄 [2FA Flow] Message: type=${msg['type']}, userAddress=${msg['userAddress']}, username=${msg['username']}');
+          }
+          
+          // Also save to SharedPreferences for backward compatibility
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('username', _usernameController.text.trim());
+          await prefs.setString('email', email);
+          
+          // Store email securely for 2FA
+          if (email.isNotEmpty && _storageService != null) {
+            await _storageService!.storeSecureData('2fa_email', email);
+            print('✅ [2FA Flow] Email stored securely for 2FA: $email');
+          }
+          
+          print('✅ [2FA Flow] Profile saved successfully, navigating to 2FA setup...');
+          
+          setState(() {
+            _isLoading = false;
+            _status = 'Profile saved! Setting up 2FA...';
+          });
+          
+          // Now navigate to 2FA setup screen
+          // Use pushReplacement so user can't go back to profile setup
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => Setup2FAScreen(
+                userId: widget.address,
+                preFilledEmail: email,
+              ),
+            ),
+          );
+        } else {
+          print('❌ [2FA Flow] Failed to save profile message');
+          setState(() {
+            _isLoading = false;
+            _status = 'Error saving profile. Please try again.';
+          });
+        }
+      } else {
+        print('❌ [2FA Flow] Failed to create profile database');
+        setState(() {
+          _isLoading = false;
+          _status = 'Error creating profile database. Please try again.';
+        });
+      }
+    } catch (e) {
+      print('❌ [2FA Flow] Error saving profile: $e');
+      setState(() {
+        _isLoading = false;
+        _status = 'Error saving profile: $e';
       });
     }
   }
