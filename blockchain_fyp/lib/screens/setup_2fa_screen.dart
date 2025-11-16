@@ -472,15 +472,16 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context); // Close dialog
-              Navigator.popUntil(context, (route) => route.isFirst); // Pop all routes
               // Navigate to workspace creation page after 2FA setup
-              Navigator.pushReplacement(
+              // Using pushReplacement to replace the entire navigation stack
+              Navigator.pushAndRemoveUntil(
                 context,
                 MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.userId)),
+                (route) => false, // Remove all previous routes
               );
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.blue[700],
+              backgroundColor: const Color(0xFF0F365F),
               foregroundColor: Colors.white,
             ),
             child: const Text('Continue'),
@@ -496,7 +497,7 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
       SnackBar(
         content: const Text('Copied to clipboard'),
         duration: const Duration(seconds: 2),
-        backgroundColor: Colors.blue[700],
+        backgroundColor: const Color(0xFF0F365F),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
@@ -516,57 +517,60 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       child: Column(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: List.generate(_stepTitles.length, (index) {
+          // Center the progress indicator
+          Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(_stepTitles.length, (index) {
               final isActive = index <= _currentStep;
               final isCompleted = index < _currentStep;
               
-              return Expanded(
-                child: Row(
-                  children: [
-                    Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        color: isCompleted 
-                            ? Colors.green[600]
-                            : isActive 
-                                ? Colors.blue[700]
-                                : Colors.grey[300],
-                        shape: BoxShape.circle,
-                      ),
-                      child: Center(
-                        child: isCompleted
-                            ? const Icon(Icons.check, color: Colors.white, size: 18)
-                            : Text(
-                                '${index + 1}',
-                                style: TextStyle(
-                                  color: isActive ? Colors.white : Colors.grey[600],
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                ),
-                              ),
-                      ),
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: isCompleted 
+                          ? Colors.green[600]
+                          : isActive 
+                              ? const Color(0xFF0F365F)
+                              : Colors.grey[300],
+                      shape: BoxShape.circle,
                     ),
-                    if (index < _stepTitles.length - 1)
-                      Expanded(
-                        child: Container(
-                          height: 2,
-                          color: isCompleted ? Colors.green[600] : Colors.grey[300],
-                        ),
-                      ),
-                  ],
-                ),
+                    child: Center(
+                      child: isCompleted
+                          ? const Icon(Icons.check, color: Colors.white, size: 18)
+                          : Text(
+                              '${index + 1}',
+                              style: TextStyle(
+                                color: isActive ? Colors.white : Colors.grey[600],
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                    ),
+                  ),
+                  if (index < _stepTitles.length - 1)
+                    Container(
+                      width: 40,
+                      height: 2,
+                      margin: const EdgeInsets.symmetric(horizontal: 8),
+                      color: isCompleted ? Colors.green[600] : Colors.grey[300],
+                    ),
+                ],
               );
             }),
+            ),
           ),
           const SizedBox(height: 12),
           Text(
             _stepTitles[_currentStep],
             style: const TextStyle(
-              color: Colors.white,
+              color: Colors.black,
               fontSize: 16,
+              fontFamily: 'Inter',
               fontWeight: FontWeight.w600,
             ),
             textAlign: TextAlign.center,
@@ -595,49 +599,95 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF0F365F), // Blue background
         borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F365F).withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.email, color: Colors.blue[700], size: 24),
+              const Icon(Icons.email, color: Colors.white, size: 24),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Enter Email',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 20,
+                      letterSpacing: 0.0,
+                      fontWeight: FontWeight.bold,
+                    ) ?? const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
             ],
           ),
           const SizedBox(height: 16),
-          const Text(
+          Text(
             'Enter your email address to receive the verification code. This email will be used for two-factor authentication.',
-            style: TextStyle(fontSize: 14, color: Colors.black87),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                  letterSpacing: 0.0,
+                ) ?? TextStyle(
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                ),
           ),
           const SizedBox(height: 20),
           TextField(
             controller: _emailController,
             keyboardType: TextInputType.emailAddress,
             enabled: !_isLoading && !_otpSent,
+            style: const TextStyle(color: Colors.white),
             decoration: InputDecoration(
               labelText: 'Email Address',
+              labelStyle: TextStyle(
+                color: Colors.white.withOpacity(0.7),
+                fontFamily: 'Inter',
+              ),
               hintText: 'user@example.com',
-              prefixIcon: const Icon(Icons.email_outlined),
+              hintStyle: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontFamily: 'Inter',
+              ),
+              prefixIcon: Icon(
+                Icons.email_outlined,
+                color: Colors.white.withOpacity(0.8),
+              ),
+              filled: true,
+              fillColor: Colors.white.withOpacity(0.15),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(
+                  color: Colors.white.withOpacity(0.3),
+                  width: 1,
+                ),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.grey[300]!),
+                borderSide: BorderSide(
+                  color: Colors.white.withOpacity(0.3),
+                  width: 1,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.blue[700]!, width: 2),
+                borderSide: const BorderSide(
+                  color: Colors.white,
+                  width: 2,
+                ),
               ),
             ),
           ),
@@ -647,28 +697,38 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
             child: ElevatedButton(
               onPressed: _isLoading || _otpSent ? null : _sendOTP,
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue[700],
-                foregroundColor: Colors.white,
+                backgroundColor: Colors.white, // White background for contrast
+                foregroundColor: const Color(0xFF0F365F), // Blue text
                 padding: const EdgeInsets.symmetric(vertical: 16),
+                elevation: 2,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
               child: _isLoading
-                  ? const SizedBox(
+                  ? SizedBox(
                       height: 20,
                       width: 20,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          const Color(0xFF0F365F),
+                        ),
                       ),
                     )
-                  : const Text(
+                  : Text(
                       'Send OTP',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            fontFamily: 'Inter',
+                            color: const Color(0xFF0F365F),
+                            fontSize: 16,
+                            letterSpacing: 0.0,
+                            fontWeight: FontWeight.bold,
+                          ) ?? const TextStyle(
+                            color: Color(0xFF0F365F),
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                     ),
             ),
           ),
@@ -681,29 +741,51 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF0F365F), // Blue background
         borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F365F).withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.verified_user, color: Colors.blue[700], size: 24),
+              const Icon(Icons.verified_user, color: Colors.white, size: 24),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Verify OTP',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 20,
+                      letterSpacing: 0.0,
+                      fontWeight: FontWeight.bold,
+                    ) ?? const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
             ],
           ),
           const SizedBox(height: 16),
           Text(
             'Enter the 6-digit code sent to $_userEmail',
-            style: const TextStyle(fontSize: 14, color: Colors.black87),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                  letterSpacing: 0.0,
+                ) ?? TextStyle(
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                ),
           ),
           const SizedBox(height: 20),
           
@@ -712,22 +794,31 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.blue[50],
+                color: Colors.white.withOpacity(0.2),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.blue[200]!),
+                border: Border.all(
+                  color: Colors.white.withOpacity(0.4),
+                  width: 1,
+                ),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.timer, color: Colors.blue[700], size: 20),
+                  const Icon(Icons.timer, color: Colors.white, size: 20),
                   const SizedBox(width: 8),
                   Text(
                     'Code expires in: ${_formatTime(_remainingTime)}',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.blue[700],
-                    ),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          fontFamily: 'Inter',
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white,
+                          letterSpacing: 0.0,
+                        ) ?? const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white,
+                        ),
                   ),
                 ],
               ),
@@ -746,16 +837,38 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
               fontSize: 24,
               fontWeight: FontWeight.bold,
               fontFamily: 'monospace',
+              color: Colors.white,
             ),
             decoration: InputDecoration(
               hintText: '000000',
+              hintStyle: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontFamily: 'monospace',
+                fontSize: 24,
+              ),
               counterText: '',
+              filled: true,
+              fillColor: Colors.white.withOpacity(0.15),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(
+                  color: Colors.white.withOpacity(0.3),
+                  width: 1,
+                ),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(
+                  color: Colors.white.withOpacity(0.3),
+                  width: 1,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.blue[700]!, width: 2),
+                borderSide: const BorderSide(
+                  color: Colors.white,
+                  width: 2,
+                ),
               ),
             ),
             inputFormatters: [
@@ -772,15 +885,29 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
               children: [
                 Text(
                   'Didn\'t receive code? ',
-                  style: TextStyle(color: Colors.grey[600]),
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontFamily: 'Inter',
+                        color: Colors.white.withOpacity(0.8),
+                        letterSpacing: 0.0,
+                      ) ?? TextStyle(
+                        color: Colors.white.withOpacity(0.8),
+                      ),
                 ),
                 TextButton(
                   onPressed: _isLoading || !_canResend ? null : _resendOTP,
                   child: Text(
                     _canResend ? 'Resend OTP' : 'Resend in ${_formatTime(_remainingTime)}',
-                    style: TextStyle(
-                      color: _canResend ? Colors.blue[700] : Colors.grey[400],
-                    ),
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontFamily: 'Inter',
+                          color: _canResend ? Colors.white : Colors.white.withOpacity(0.5),
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.0,
+                          decoration: _canResend ? TextDecoration.underline : null,
+                        ) ?? TextStyle(
+                          color: _canResend ? Colors.white : Colors.white.withOpacity(0.5),
+                          fontWeight: FontWeight.w600,
+                          decoration: _canResend ? TextDecoration.underline : null,
+                        ),
                   ),
                 ),
               ],
@@ -796,11 +923,28 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
                   onPressed: _isLoading || _codeVerified ? null : _previousStep,
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 16),
+                    side: BorderSide(
+                      color: Colors.white.withOpacity(0.5),
+                      width: 1.5,
+                    ),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  child: const Text('Back'),
+                  child: Text(
+                    'Back',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          fontFamily: 'Inter',
+                          color: Colors.white,
+                          fontSize: 16,
+                          letterSpacing: 0.0,
+                          fontWeight: FontWeight.w600,
+                        ) ?? const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
                 ),
               ),
               const SizedBox(width: 16),
@@ -808,28 +952,38 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
                 child: ElevatedButton(
                   onPressed: _isLoading || _codeVerified ? null : _verifyOTP,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue[700],
-                    foregroundColor: Colors.white,
+                    backgroundColor: Colors.white, // White background for contrast
+                    foregroundColor: const Color(0xFF0F365F), // Blue text
                     padding: const EdgeInsets.symmetric(vertical: 16),
+                    elevation: 2,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
                   child: _isLoading
-                      ? const SizedBox(
+                      ? SizedBox(
                           height: 20,
                           width: 20,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              const Color(0xFF0F365F),
+                            ),
                           ),
                         )
                       : Text(
                           _codeVerified ? 'Verified ✓' : 'Verify',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
+                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                fontFamily: 'Inter',
+                                color: const Color(0xFF0F365F),
+                                fontSize: 16,
+                                letterSpacing: 0.0,
+                                fontWeight: FontWeight.bold,
+                              ) ?? const TextStyle(
+                                color: Color(0xFF0F365F),
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
                         ),
                 ),
               ),
@@ -844,38 +998,63 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF0F365F), // Blue background
         borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F365F).withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.backup, color: Colors.orange[700], size: 24),
+              const Icon(Icons.backup, color: Colors.white, size: 24),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Backup Codes',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 20,
+                      letterSpacing: 0.0,
+                      fontWeight: FontWeight.bold,
+                    ) ?? const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
             ],
           ),
           const SizedBox(height: 16),
-          const Text(
+          Text(
             'Save these backup codes in a secure location. You can use them to access your account if you lose access to your email.',
-            style: TextStyle(fontSize: 14, color: Colors.black87),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                  letterSpacing: 0.0,
+                ) ?? TextStyle(
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                ),
           ),
           const SizedBox(height: 20),
           
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: Colors.orange[50],
+              color: Colors.white.withOpacity(0.15),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.orange[200]!),
+              border: Border.all(
+                color: Colors.white.withOpacity(0.3),
+                width: 1,
+              ),
             ),
             height: 250,
             child: ListView.builder(
@@ -889,16 +1068,22 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
                       Expanded(
                         child: Text(
                           code,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontFamily: 'monospace',
                             fontSize: 16,
                             fontWeight: FontWeight.w500,
+                            color: Colors.white,
+                            letterSpacing: 1.2,
                           ),
                         ),
                       ),
                       IconButton(
                         onPressed: () => _copyToClipboard(code),
-                        icon: const Icon(Icons.copy, size: 18),
+                        icon: Icon(
+                          Icons.copy,
+                          size: 18,
+                          color: Colors.white.withOpacity(0.8),
+                        ),
                         tooltip: 'Copy code',
                       ),
                     ],
@@ -917,11 +1102,28 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
                   onPressed: _previousStep,
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 16),
+                    side: BorderSide(
+                      color: Colors.white.withOpacity(0.5),
+                      width: 1.5,
+                    ),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  child: const Text('Back'),
+                  child: Text(
+                    'Back',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          fontFamily: 'Inter',
+                          color: Colors.white,
+                          fontSize: 16,
+                          letterSpacing: 0.0,
+                          fontWeight: FontWeight.w600,
+                        ) ?? const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
                 ),
               ),
               const SizedBox(width: 16),
@@ -929,14 +1131,28 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
                 child: ElevatedButton(
                   onPressed: _nextStep,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange[700],
-                    foregroundColor: Colors.white,
+                    backgroundColor: Colors.white, // White background for contrast
+                    foregroundColor: const Color(0xFF0F365F), // Blue text
                     padding: const EdgeInsets.symmetric(vertical: 16),
+                    elevation: 2,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  child: const Text('I\'ve Saved Them'),
+                  child: Text(
+                    'I\'ve Saved Them',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          fontFamily: 'Inter',
+                          color: const Color(0xFF0F365F),
+                          fontSize: 16,
+                          letterSpacing: 0.0,
+                          fontWeight: FontWeight.bold,
+                        ) ?? const TextStyle(
+                          color: Color(0xFF0F365F),
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
                 ),
               ),
             ],
@@ -950,29 +1166,51 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF0F365F), // Blue background
         borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F365F).withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.check_circle, color: Colors.green[600], size: 24),
+              const Icon(Icons.check_circle, color: Colors.white, size: 24),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Complete Setup',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 20,
+                      letterSpacing: 0.0,
+                      fontWeight: FontWeight.bold,
+                    ) ?? const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
             ],
           ),
           const SizedBox(height: 16),
-          const Text(
+          Text(
             'Review your 2FA settings and complete the setup:',
-            style: TextStyle(fontSize: 14, color: Colors.black87),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                  letterSpacing: 0.0,
+                ) ?? TextStyle(
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                ),
           ),
           const SizedBox(height: 20),
           
@@ -980,9 +1218,12 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: Colors.grey[50],
+              color: Colors.white.withOpacity(0.15),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.grey[300]!),
+              border: Border.all(
+                color: Colors.white.withOpacity(0.3),
+                width: 1,
+              ),
             ),
             child: Column(
               children: [
@@ -998,16 +1239,53 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
           
           // Biometric Option
           if (_biometricAvailable) ...[
-            SwitchListTile(
-              title: const Text('Enable Biometric Authentication'),
-              subtitle: const Text('Use fingerprint or face ID for quick access'),
-              value: _biometricEnabled,
-              onChanged: (value) {
-                setState(() {
-                  _biometricEnabled = value;
-                });
-              },
-              activeColor: Colors.blue[700],
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: Colors.white.withOpacity(0.2),
+                  width: 1,
+                ),
+              ),
+              child: SwitchListTile(
+                title: Text(
+                  'Enable Biometric Authentication',
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                        fontFamily: 'Inter',
+                        color: Colors.white,
+                        fontSize: 16,
+                        letterSpacing: 0.0,
+                        fontWeight: FontWeight.w500,
+                      ) ?? const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
+                ),
+                subtitle: Text(
+                  'Use fingerprint or face ID for quick access',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontFamily: 'Inter',
+                        color: Colors.white.withOpacity(0.8),
+                        fontSize: 14,
+                        letterSpacing: 0.0,
+                      ) ?? TextStyle(
+                        color: Colors.white.withOpacity(0.8),
+                        fontSize: 14,
+                      ),
+                ),
+                value: _biometricEnabled,
+                onChanged: (value) {
+                  setState(() {
+                    _biometricEnabled = value;
+                  });
+                },
+                activeColor: Colors.white,
+                activeTrackColor: const Color(0xFF0F365F).withOpacity(0.5),
+                inactiveThumbColor: Colors.white.withOpacity(0.5),
+                inactiveTrackColor: Colors.white.withOpacity(0.2),
+              ),
             ),
             const SizedBox(height: 20),
           ],
@@ -1017,28 +1295,38 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
             child: ElevatedButton(
               onPressed: _isLoading ? null : _enable2FA,
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green[600],
-                foregroundColor: Colors.white,
+                backgroundColor: Colors.white, // White background for contrast
+                foregroundColor: const Color(0xFF0F365F), // Blue text
                 padding: const EdgeInsets.symmetric(vertical: 16),
+                elevation: 2,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
               child: _isLoading
-                  ? const SizedBox(
+                  ? SizedBox(
                       height: 20,
                       width: 20,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          const Color(0xFF0F365F),
+                        ),
                       ),
                     )
-                  : const Text(
+                  : Text(
                       'Enable 2FA',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            fontFamily: 'Inter',
+                            color: const Color(0xFF0F365F),
+                            fontSize: 16,
+                            letterSpacing: 0.0,
+                            fontWeight: FontWeight.bold,
+                          ) ?? const TextStyle(
+                            color: Color(0xFF0F365F),
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                     ),
             ),
           ),
@@ -1052,23 +1340,41 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         children: [
-          Icon(icon, size: 20, color: Colors.grey[600]),
+          Icon(
+            icon,
+            size: 20,
+            color: Colors.white.withOpacity(0.9),
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
               title,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontFamily: 'Inter',
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white,
+                    letterSpacing: 0.0,
+                  ) ?? const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white,
+                  ),
             ),
           ),
           Text(
             value,
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey[600],
-            ),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  fontSize: 14,
+                  color: Colors.white.withOpacity(0.9),
+                  letterSpacing: 0.0,
+                  fontWeight: FontWeight.w600,
+                ) ?? TextStyle(
+                  fontSize: 14,
+                  color: Colors.white.withOpacity(0.9),
+                  fontWeight: FontWeight.w600,
+                ),
           ),
         ],
       ),
@@ -1078,11 +1384,24 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF00163A),
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF00163A),
+        backgroundColor: const Color(0xFF0F365F),
         foregroundColor: Colors.white,
-        title: const Text('Setup Two-Factor Authentication'),
+        title: Text(
+          'Setup Two-Factor Authentication',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontFamily: 'Inter',
+                color: Colors.white,
+                fontSize: 20,
+                letterSpacing: 0.0,
+                fontWeight: FontWeight.w600,
+              ) ?? const TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+              ),
+        ),
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),

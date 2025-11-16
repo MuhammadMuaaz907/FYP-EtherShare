@@ -4,7 +4,7 @@
   "description": "OrbitDB bridge for Flutter app with Helia IPFS and Libp2p",
   "main": "orbitdb_bridge.js",
   "scripts": {
-    "start": "node orbitdb_bridge.js",
+    "start": "node init && node orbitdb_bridge.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

@@ -39,74 +39,138 @@ class _AddByEmailPageState extends State<AddByEmailPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF1A2236),
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
-        title: const Text(
-          'Add by Email',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-        ),
-        actions: [
-          TextButton(
-            onPressed: (_canSend && !_isSending) ? _handleSend : null,
-            child: _isSending
-                ? const SizedBox(
-                    height: 18,
-                    width: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : Text(
-                    'Send',
-                    style: TextStyle(
-                      color: _canSend ? Colors.white : Colors.white38,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 16,
-                    ),
-                  ),
-          ),
-        ],
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () {
-            Navigator.pop(context);
-          },
-        ),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-        child: Column(
-          children: [
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF232B3E),
-                borderRadius: BorderRadius.circular(10),
+    return GestureDetector(
+      onTap: () {
+        FocusScope.of(context).unfocus();
+        FocusManager.instance.primaryFocus?.unfocus();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          backgroundColor: Colors.white,
+          elevation: 0,
+          automaticallyImplyLeading: false,
+          leading: IconButton(
+            icon: const Icon(
+              Icons.arrow_back,
+              color: Colors.black,
+              size: 24,
+            ),
+            onPressed: () {
+              Navigator.pop(context);
+            },
+            style: IconButton.styleFrom(
+              backgroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
               ),
-              child: Row(
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 12),
-                    child: Icon(Icons.search, color: Colors.white38, size: 26),
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      style: const TextStyle(color: Colors.white, fontSize: 17),
-                      decoration: const InputDecoration(
-                        border: InputBorder.none,
-                        hintText: 'name@example.com',
-                        hintStyle: TextStyle(color: Colors.white38, fontSize: 17),
-                        contentPadding: EdgeInsets.symmetric(vertical: 18),
+            ),
+          ),
+          title: Text(
+            'Add by Email',
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.black,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.0,
+                ) ?? const TextStyle(
+                  color: Colors.black,
+                  fontWeight: FontWeight.w600,
+                ),
+          ),
+          centerTitle: true,
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(right: 8.0),
+              child: TextButton(
+                onPressed: (_canSend && !_isSending) ? _handleSend : null,
+                child: _isSending
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFF0F365F),
+                        ),
+                      )
+                    : Text(
+                        'Send',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontFamily: 'Inter',
+                              color: _canSend ? const Color(0xFF0F365F) : Colors.grey[400],
+                              fontWeight: FontWeight.w600,
+                              fontSize: 16,
+                              letterSpacing: 0.0,
+                            ) ?? TextStyle(
+                              color: _canSend ? const Color(0xFF0F365F) : Colors.grey[400],
+                              fontWeight: FontWeight.w600,
+                              fontSize: 16,
+                            ),
                       ),
-                      keyboardType: TextInputType.emailAddress,
-                    ),
-                  ),
-                ],
               ),
             ),
           ],
+        ),
+        body: SafeArea(
+          top: true,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 16),
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF5F5F5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFFE0E0E0),
+                      width: 2,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16),
+                        child: Icon(
+                          Icons.search,
+                          color: Color(0xFF0F365F),
+                          size: 24,
+                        ),
+                      ),
+                      Expanded(
+                        child: TextField(
+                          controller: _controller,
+                          autofocus: true,
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                fontFamily: 'Inter',
+                                letterSpacing: 0.0,
+                              ) ?? const TextStyle(
+                                fontSize: 14,
+                              ),
+                          decoration: InputDecoration(
+                            border: InputBorder.none,
+                            hintText: 'name@example.com',
+                            hintStyle: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                  fontFamily: 'Inter',
+                                  color: Colors.grey[400],
+                                  letterSpacing: 0.0,
+                                ) ?? TextStyle(
+                                  color: Colors.grey[400],
+                                  fontSize: 14,
+                                ),
+                            contentPadding: const EdgeInsets.symmetric(vertical: 18),
+                          ),
+                          keyboardType: TextInputType.emailAddress,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+              ],
+            ),
+          ),
         ),
       ),
     );

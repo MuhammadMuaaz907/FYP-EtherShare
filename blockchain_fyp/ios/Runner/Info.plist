@@ -69,5 +69,11 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>This app needs access to your camera to take photos and share them in channels.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app needs access to your photo library to select and share images in channels.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>This app needs access to your microphone to record and send voice messages.</string>
 </dict>
 </plist>

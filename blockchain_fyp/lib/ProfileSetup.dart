@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:email_validator/email_validator.dart';
-import 'create_workspace_page.dart';
 import 'screens/setup_2fa_screen.dart';
 import 'services/secure_storage_service.dart';
 import 'services/orbitdb_service.dart';
@@ -22,19 +20,20 @@ class ProfileSetupScreen extends StatefulWidget {
 }
 
 class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
-  final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _firstNameController = TextEditingController();
+  final TextEditingController _lastNameController = TextEditingController();
+  final TextEditingController _designationController = TextEditingController();
   String _status = '';
   bool _isLoading = false;
-  bool _show2FASetupPrompt = false;
   String? _emailError;
   SecureStorageService? _storageService;
 
   @override
   void initState() {
     super.initState();
-    _show2FASetupPrompt = widget.show2FASetup;
     _initializeServices();
+    _loadExistingProfile();
   }
 
   Future<void> _initializeServices() async {
@@ -42,6 +41,45 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       _storageService = await SecureStorageService.create();
     } catch (e) {
       print('Error initializing SecureStorageService: $e');
+    }
+  }
+
+  /// Load existing profile data from OrbitDB
+  Future<void> _loadExistingProfile() async {
+    try {
+      final key = widget.address.toLowerCase().trim();
+      final dbName = 'profile_$key';
+      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+
+      if (dbAddress != null) {
+        final messages = await OrbitDBService.getMessages(dbAddress);
+        
+        for (var message in messages) {
+          if (message['type'] == 'profile' &&
+              message['userAddress']?.toString().toLowerCase() == key) {
+            // Load existing data into controllers
+            setState(() {
+              _firstNameController.text = message['firstName']?.toString() ?? '';
+              _lastNameController.text = message['lastName']?.toString() ?? '';
+              _emailController.text = message['email']?.toString() ?? '';
+              _designationController.text = message['designation']?.toString() ?? '';
+            });
+            print('✅ Loaded existing profile data');
+            return;
+          }
+        }
+      }
+      
+      // Fallback: Try loading from SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        _firstNameController.text = prefs.getString('firstName') ?? '';
+        _lastNameController.text = prefs.getString('lastName') ?? '';
+        _emailController.text = prefs.getString('email') ?? '';
+        _designationController.text = prefs.getString('designation') ?? '';
+      });
+    } catch (e) {
+      print('⚠️ Error loading existing profile: $e');
     }
   }
 
@@ -68,22 +106,28 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   }
 
   Future<void> _saveProfile() async {
-    // Validate username
-    if (_usernameController.text.trim().isEmpty) {
+    // Validate first name
+    if (_firstNameController.text.trim().isEmpty) {
       setState(() {
-        _status = 'Please enter your name';
+        _status = 'Please enter your first name';
       });
       return;
     }
 
-    // Validate email if 2FA is enabled or prompted
-    if (_show2FASetupPrompt || widget.show2FASetup) {
+    // Validate last name
+    if (_lastNameController.text.trim().isEmpty) {
+      setState(() {
+        _status = 'Please enter your last name';
+      });
+      return;
+    }
+
+    // Validate email (required for 2FA)
       if (!_validateEmail(_emailController.text.trim())) {
         setState(() {
           _status = _emailError ?? 'Please enter a valid email address';
         });
         return;
-      }
     }
 
     setState(() {
@@ -102,14 +146,22 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         print('💾 Saving profile to database: $dbAddress');
         print('📝 Database name: $dbName');
         print('📝 User address: $key');
-        print('📝 Username: ${_usernameController.text.trim()}');
+        print('📝 First Name: ${_firstNameController.text.trim()}');
+        print('📝 Last Name: ${_lastNameController.text.trim()}');
+        print('📝 Designation: ${_designationController.text.trim()}');
         print('📝 Email: ${_emailController.text.trim()}');
         
         if (dbAddress != null) {
+          // Combine first and last name for username (backward compatibility)
+          final fullName = '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}'.trim();
+          
           final profileMessage = {
             'type': 'profile',
             'userAddress': key,
-            'username': _usernameController.text.trim(),
+            'username': fullName,
+            'firstName': _firstNameController.text.trim(),
+            'lastName': _lastNameController.text.trim(),
+            'designation': _designationController.text.trim(),
             'email': _emailController.text.trim(),
             'timestamp': DateTime.now().millisecondsSinceEpoch,
           };
@@ -134,7 +186,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           
           // Also save to SharedPreferences for backward compatibility
           final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('username', _usernameController.text.trim());
+          await prefs.setString('username', fullName);
+          await prefs.setString('firstName', _firstNameController.text.trim());
+          await prefs.setString('lastName', _lastNameController.text.trim());
+          await prefs.setString('designation', _designationController.text.trim());
           await prefs.setString('email', _emailController.text.trim());
           
           // Store email securely for 2FA
@@ -145,17 +200,29 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           
           setState(() {
             _isLoading = false;
-            _status = 'Profile saved successfully to OrbitDB!';
+            _status = 'Profile saved successfully!';
           });
           
-          // Show 2FA setup prompt for new users, otherwise go to workspace creation
-          if (_show2FASetupPrompt) {
-            await _show2FASetupDialog();
-          } else {
+          // Navigate to 2FA setup only if show2FASetup is true (onboarding flow)
+          if (widget.show2FASetup) {
+            await Future.delayed(const Duration(milliseconds: 500));
+            if (mounted) {
             Navigator.pushReplacement(
               context,
-              MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.address)),
+                MaterialPageRoute(
+                  builder: (_) => Setup2FAScreen(
+                    userId: widget.address,
+                    preFilledEmail: _emailController.text.trim(),
+                  ),
+                ),
             );
+            }
+          } else {
+            // For edit mode, just pop back to profile page
+            await Future.delayed(const Duration(milliseconds: 500));
+            if (mounted) {
+              Navigator.pop(context, true); // Return true to indicate success
+            }
           }
         } else {
           print('❌ Failed to save profile message');
@@ -179,297 +246,180 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     }
   }
 
-  Future<void> _show2FASetupDialog() async {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: Colors.white,
-          title: const Text(
-            'Secure Your Account',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.security,
-                size: 48,
-                color: Colors.blue[700],
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Would you like to enable Two-Factor Authentication (2FA) for enhanced security?',
-                style: TextStyle(fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                '2FA adds an extra layer of security to protect your account from unauthorized access.',
-                style: TextStyle(fontSize: 14, color: Colors.grey),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                Navigator.pushReplacement(
-                  context,
-                  MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.address)),
-                );
-              },
-              child: const Text('Skip for Now'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _navigateTo2FASetup();
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue[700],
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Enable 2FA'),
-            ),
-          ],
-        );
-      },
-    );
-  }
 
-  Future<void> _navigateTo2FASetup() async {
-    try {
-      final email = _emailController.text.trim();
-      
-      // Validate email before navigating
-      if (!_validateEmail(email)) {
-        setState(() {
-          _status = _emailError ?? 'Please enter a valid email address';
-        });
-        return;
-      }
-      
-      // Navigate to 2FA setup if requested, otherwise go to workspace creation
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => Setup2FAScreen(
-            userId: widget.address,
-            preFilledEmail: email,
-          ),
-        ),
-      );
-    } catch (e) {
-      print('❌ Error saving profile: $e');
-      setState(() {
-        _status = 'Error navigating to 2FA setup: $e';
-      });
-    }
-  }
-
-  Future<void> _setup2FA() async {
-    // Validate username first
-    if (_usernameController.text.trim().isEmpty) {
-      setState(() {
-        _status = 'Please enter your name before setting up 2FA';
-      });
-      return;
-    }
-
-    final email = _emailController.text.trim();
-    
-    // Validate email before setting up 2FA
-    if (!_validateEmail(email)) {
-      setState(() {
-        _status = _emailError ?? 'Please enter a valid email address';
-      });
-      return;
-    }
-
-    setState(() {
-      _isLoading = true;
-      _status = 'Saving profile and setting up 2FA...';
-    });
-
-    try {
-      // First, save the profile to OrbitDB (same as _saveProfile but without navigation)
-      final key = widget.address.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      
-      print('💾 [2FA Flow] Saving profile before 2FA setup...');
-      print('📝 [2FA Flow] Database name: $dbName');
-      print('📝 [2FA Flow] Username: ${_usernameController.text.trim()}');
-      print('📝 [2FA Flow] Email: $email');
-      
-      // Create the database first
-      final dbAddress = await OrbitDBService.createChatDB(dbName);
-      
-      if (dbAddress != null) {
-        final profileMessage = {
-          'type': 'profile',
-          'userAddress': key,
-          'username': _usernameController.text.trim(),
-          'email': email,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        };
-        
-        print('📋 [2FA Flow] Profile message to save: $profileMessage');
-        
-        final result = await OrbitDBService.addMessage(dbAddress, profileMessage);
-        
-        if (result != null) {
-          print('✅ [2FA Flow] Profile saved successfully with hash: $result');
-          
-          // Verify the save
-          print('🔍 [2FA Flow] Verifying profile save...');
-          final verifyMessages = await OrbitDBService.getMessages(dbAddress);
-          print('📨 [2FA Flow] Retrieved ${verifyMessages.length} messages after save');
-          for (var msg in verifyMessages) {
-            print('📄 [2FA Flow] Message: type=${msg['type']}, userAddress=${msg['userAddress']}, username=${msg['username']}');
-          }
-          
-          // Also save to SharedPreferences for backward compatibility
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('username', _usernameController.text.trim());
-          await prefs.setString('email', email);
-          
-          // Store email securely for 2FA
-          if (email.isNotEmpty && _storageService != null) {
-            await _storageService!.storeSecureData('2fa_email', email);
-            print('✅ [2FA Flow] Email stored securely for 2FA: $email');
-          }
-          
-          print('✅ [2FA Flow] Profile saved successfully, navigating to 2FA setup...');
-          
-          setState(() {
-            _isLoading = false;
-            _status = 'Profile saved! Setting up 2FA...';
-          });
-          
-          // Now navigate to 2FA setup screen
-          // Use pushReplacement so user can't go back to profile setup
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => Setup2FAScreen(
-                userId: widget.address,
-                preFilledEmail: email,
-              ),
-            ),
-          );
-        } else {
-          print('❌ [2FA Flow] Failed to save profile message');
-          setState(() {
-            _isLoading = false;
-            _status = 'Error saving profile. Please try again.';
-          });
-        }
-      } else {
-        print('❌ [2FA Flow] Failed to create profile database');
-        setState(() {
-          _isLoading = false;
-          _status = 'Error creating profile database. Please try again.';
-        });
-      }
-    } catch (e) {
-      print('❌ [2FA Flow] Error saving profile: $e');
-      setState(() {
-        _isLoading = false;
-        _status = 'Error saving profile: $e';
-      });
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF1A2236),
+          backgroundColor: Colors.white,
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
-        title: const Text(
-          'Profile Setup',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+        backgroundColor: const Color(0xFF0F365F),
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          icon: const Icon(
+            Icons.arrow_back_rounded,
+            color: Colors.white,
+            size: 25,
+          ),
+          onPressed: () {
+            Navigator.pop(context);
+          },
         ),
-        centerTitle: true,
+        title: Text(
+          'Complete Profile',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontFamily: 'Inter',
+                color: Colors.white,
+                fontSize: 20,
+                letterSpacing: 0.0,
+                fontWeight: FontWeight.w600,
+              ) ?? const TextStyle(
+                color: Colors.white,
+              fontSize: 20,
+                fontWeight: FontWeight.w600,
+            ),
+          ),
+        centerTitle: false,
+        elevation: 0,
       ),
-      body: Center(
+      body: SafeArea(
+        top: true,
         child: SingleChildScrollView(
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.max,
             children: [
-              // Avatar image
-              const CircleAvatar(
-                radius: 100,
-                backgroundImage: AssetImage('assets/ProfileIcon.png'), // 👈 Your image here
-                backgroundColor: Colors.transparent,
-              ),
-              const SizedBox(height: 24),
-              
-              // Heading
-              const Text(
-                'Setup your profile',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
+              // Link your Email Section
+              Container(
+                width: double.infinity,
+                decoration: const BoxDecoration(
+                  color: Color(0xFF0F365F),
+                ),
+                child: Padding(
+                  padding: const EdgeInsetsDirectional.fromSTEB(16, 24, 16, 24),
+                  child: Container(
+                    width: MediaQuery.of(context).size.width * 0.9,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      boxShadow: [
+                        BoxShadow(
+                          blurRadius: 8,
+                          color: const Color(0x36000000),
+                          offset: const Offset(0.0, 4),
+                        ),
+                      ],
+                      borderRadius: BorderRadius.circular(8),
+        ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.max,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.max,
+                            children: [
+                              Card(
+                                clipBehavior: Clip.antiAliasWithSaveLayer,
+                                color: const Color(0xFF0F365F),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Padding(
+                                  padding: EdgeInsets.all(8),
+                                  child: Icon(
+                                    Icons.email_outlined,
+                                    color: Colors.white,
+                                    size: 24,
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsetsDirectional.fromSTEB(8, 0, 0, 0),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.max,
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Padding(
+                                        padding: const EdgeInsetsDirectional.fromSTEB(8, 0, 0, 0),
+                                        child: Text(
+                                          'Link your Email',
+                                          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                                fontFamily: 'Inter',
+                                                letterSpacing: 0.0,
+                                                fontWeight: FontWeight.bold,
+                                              ) ?? const TextStyle(
+                                                fontSize: 20,
+                                                fontWeight: FontWeight.bold,
+        ),
+                                        ),
+      ),
+                                      Padding(
+                                        padding: const EdgeInsetsDirectional.fromSTEB(8, 4, 12, 0),
+                                        child: Text(
+                                          'Enable security by connecting your Email.',
+                                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                                fontFamily: 'Inter',
+                                                fontSize: 12,
+                                                letterSpacing: 0.0,
+                                              ) ?? const TextStyle(
+                                                fontSize: 12,
+                                              ),
                 ),
               ),
-              const SizedBox(height: 24),
-
-              // Name Field
-              TextField(
-                controller: _usernameController,
-                decoration: const InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white,
-                  hintText: 'Name',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // Email Field
-              TextField(
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          Padding(
+                            padding: const EdgeInsetsDirectional.fromSTEB(0, 16, 0, 0),
+                            child: TextFormField(
                 controller: _emailController,
                 keyboardType: TextInputType.emailAddress,
                 decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white,
-                  hintText: 'Email (required for 2FA)',
-                  border: OutlineInputBorder(
-                    borderSide: BorderSide(
-                      color: _emailError != null ? Colors.red : Colors.grey,
-                      width: _emailError != null ? 2 : 1,
-                    ),
-                  ),
+                                hintText: 'Email',
+                                hintStyle: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                      fontFamily: 'Inter',
+                                      letterSpacing: 0.0,
+                                    ) ?? const TextStyle(fontSize: 14),
                   enabledBorder: OutlineInputBorder(
-                    borderSide: BorderSide(
-                      color: _emailError != null ? Colors.red : Colors.grey,
-                      width: _emailError != null ? 2 : 1,
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFF0F365F),
+                                    width: 2,
                     ),
+                                  borderRadius: BorderRadius.circular(8),
                   ),
                   focusedBorder: OutlineInputBorder(
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFF0F365F),
+                                    width: 2,
+                                  ),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                errorBorder: OutlineInputBorder(
+                                  borderSide: BorderSide(
+                                    color: Theme.of(context).colorScheme.error,
+                                    width: 2,
+                                  ),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                focusedErrorBorder: OutlineInputBorder(
                     borderSide: BorderSide(
-                      color: _emailError != null ? Colors.red : Colors.blue,
+                                    color: Theme.of(context).colorScheme.error,
                       width: 2,
                     ),
+                                  borderRadius: BorderRadius.circular(8),
                   ),
+                                filled: true,
+                                fillColor: const Color(0x4CFEFEFF),
                   errorText: _emailError,
-                  errorStyle: const TextStyle(
-                    color: Colors.red,
-                    fontSize: 12,
                   ),
-                ),
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    fontFamily: 'Inter',
+                                    letterSpacing: 0.0,
+                                  ) ?? const TextStyle(fontSize: 14),
                 onChanged: (value) {
-                  // Clear error when user starts typing
                   if (_emailError != null && value.isNotEmpty) {
                     setState(() {
                       _emailError = null;
@@ -477,11 +427,195 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   }
                 },
               ),
-              const SizedBox(height: 16),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              
+              // Your information Section
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(16, 24, 16, 0),
+                child: Row(
+                  mainAxisSize: MainAxisSize.max,
+                  children: [
+                    Text(
+                      'Your information',
+                      style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                            fontFamily: 'Inter',
+                            letterSpacing: 0.0,
+                            fontWeight: FontWeight.bold,
+                          ) ?? const TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+              
+              // Form Fields
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(16, 0, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.max,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsetsDirectional.fromSTEB(0, 16, 0, 0),
+                      child: TextFormField(
+                        controller: _firstNameController,
+                        decoration: InputDecoration(
+                          labelText: 'First Name',
+                          labelStyle: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                fontFamily: 'Inter',
+                                letterSpacing: 0.0,
+                              ) ?? const TextStyle(fontSize: 14),
+                          hintText: ' ',
+                          enabledBorder: OutlineInputBorder(
+                            borderSide: const BorderSide(
+                              color: Color(0xFFE0E0E0),
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderSide: const BorderSide(
+                              color: Color(0xFF0F365F),
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          errorBorder: OutlineInputBorder(
+                            borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.error,
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          focusedErrorBorder: OutlineInputBorder(
+                            borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.error,
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          filled: true,
+                          fillColor: Colors.white,
+                        ),
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              fontFamily: 'Inter',
+                              letterSpacing: 0.0,
+                            ) ?? const TextStyle(fontSize: 14),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsetsDirectional.fromSTEB(0, 16, 0, 0),
+                      child: TextFormField(
+                        controller: _lastNameController,
+                        decoration: InputDecoration(
+                          labelText: 'Last Name',
+                          labelStyle: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                fontFamily: 'Inter',
+                                letterSpacing: 0.0,
+                              ) ?? const TextStyle(fontSize: 14),
+                          hintText: ' ',
+                          enabledBorder: OutlineInputBorder(
+                            borderSide: const BorderSide(
+                              color: Color(0xFFE0E0E0),
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderSide: const BorderSide(
+                              color: Color(0xFF0F365F),
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          errorBorder: OutlineInputBorder(
+                            borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.error,
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          focusedErrorBorder: OutlineInputBorder(
+                            borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.error,
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          filled: true,
+                          fillColor: Colors.white,
+                        ),
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              fontFamily: 'Inter',
+                              letterSpacing: 0.0,
+                            ) ?? const TextStyle(fontSize: 14),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsetsDirectional.fromSTEB(0, 16, 0, 0),
+                      child: TextFormField(
+                        controller: _designationController,
+                        decoration: InputDecoration(
+                          labelText: 'Designation',
+                          labelStyle: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                fontFamily: 'Inter',
+                                letterSpacing: 0.0,
+                              ) ?? const TextStyle(fontSize: 14),
+                          hintText: ' ',
+                          enabledBorder: OutlineInputBorder(
+                            borderSide: const BorderSide(
+                              color: Color(0xFFE0E0E0),
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderSide: const BorderSide(
+                              color: Color(0xFF0F365F),
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          errorBorder: OutlineInputBorder(
+                            borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.error,
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          focusedErrorBorder: OutlineInputBorder(
+                            borderSide: BorderSide(
+                              color: Theme.of(context).colorScheme.error,
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          filled: true,
+                          fillColor: Colors.white,
+                        ),
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              fontFamily: 'Inter',
+                              letterSpacing: 0.0,
+                            ) ?? const TextStyle(fontSize: 14),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
 
               // Status Message
               if (_status.isNotEmpty) ...[
-                Container(
+                Padding(
+                  padding: const EdgeInsetsDirectional.fromSTEB(16, 0, 16, 16),
+                  child: Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: _status.contains('successful') 
@@ -504,49 +638,48 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                     textAlign: TextAlign.center,
                   ),
                 ),
-                const SizedBox(height: 16),
+                ),
               ],
 
               // Save Button
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(16, 0, 16, 24),
+                child: SizedBox(
+                  width: 270,
+                  height: 50,
+                  child: FilledButton(
                   onPressed: _isLoading ? null : _saveProfile,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF0F365F),
+                      foregroundColor: Colors.white,
+                      elevation: 3,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                   ),
                   child: _isLoading
                       ? const SizedBox(
+                            width: 20,
                           height: 20,
-                          width: 20,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.black),
+                              color: Colors.white,
                           ),
                         )
-                      : const Text('Save'),
-                ),
-              ),
-
-              // 2FA Setup Option (for existing users)
-              if (!_show2FASetupPrompt) ...[
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _setup2FA,
-                    icon: const Icon(Icons.security, size: 18),
-                    label: const Text('Setup 2FA'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: const BorderSide(color: Colors.white),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                        : Text(
+                            'Save',
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                  fontFamily: 'Inter',
+                                  color: Colors.white,
+                                  letterSpacing: 0.0,
+                                ) ?? const TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.white,
+                                ),
+                          ),
                     ),
                   ),
                 ),
-              ],
             ],
           ),
         ),
@@ -556,8 +689,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
 
   @override
   void dispose() {
-    _usernameController.dispose();
     _emailController.dispose();
+    _firstNameController.dispose();
+    _lastNameController.dispose();
+    _designationController.dispose();
     super.dispose();
   }
 }

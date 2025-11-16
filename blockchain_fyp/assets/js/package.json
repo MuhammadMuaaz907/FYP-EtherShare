@@ -5,7 +5,7 @@
   "type": "module",
   "main": "orbitdb_bridge.js",
   "scripts": {
-    "start": "node orbitdb_bridge.js",
+    "start": "node init && node orbitdb_bridge.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
