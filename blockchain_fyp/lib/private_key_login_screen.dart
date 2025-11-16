@@ -167,7 +167,10 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
         if (mounted) {
           Navigator.pushReplacement(
             context,
-            MaterialPageRoute(builder: (_) => ProfileSetupScreen(address: address)),
+            MaterialPageRoute(builder: (_) => ProfileSetupScreen(
+              address: address,
+              show2FASetup: true, // Enable 2FA setup flow after profile completion
+            )),
           );
         }
         return;
@@ -185,7 +188,10 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
       if (mounted) {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => ProfileSetupScreen(address: address)),
+          MaterialPageRoute(builder: (_) => ProfileSetupScreen(
+            address: address,
+            show2FASetup: true, // Enable 2FA setup flow after profile completion
+          )),
         );
       }
     } catch (e) {

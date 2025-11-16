@@ -17,6 +17,7 @@ dependencies:
   share_plus: ^7.2.1
   hex: ^0.2.0
   file_picker: ^8.0.7
+  image_picker: ^1.0.7
   dio: ^5.8.0+1
   open_file: ^3.3.2
   open_file_macos: ^0.0.1
@@ -32,6 +33,9 @@ dependencies:
   email_validator: ^2.1.17
   flutter_dotenv: ^5.1.0
   app_links: ^3.4.2
+  record: ^5.1.2
+  permission_handler: ^11.3.1
+  audioplayers: ^6.0.0
 
 dev_dependencies:
   flutter_test:
@@ -42,6 +46,9 @@ dev_dependencies:
   mockito: ^5.4.4
   build_runner: ^2.4.7
 
+dependency_overrides:
+  record_linux: ^1.2.0
+
 flutter:
   uses-material-design: true
   assets:
@@ -49,4 +56,5 @@ flutter:
     - assets/logo.png
     - assets/chat_illustration.png
     - assets/ProfileIcon.png
+    - assets/team_illustration.webp
     - .env

@@ -690,8 +690,9 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
         const Text(
           'Verify Your Identity',
           style: TextStyle(
-            color: Colors.white,
+            color: Colors.black,
             fontSize: 28,
+            fontFamily: 'Inter',
             fontWeight: FontWeight.bold,
           ),
           textAlign: TextAlign.center,
@@ -699,20 +700,30 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
         const SizedBox(height: 12),
         Text(
           'Complete your login with two-factor authentication',
-          style: TextStyle(
-            color: Colors.white.withOpacity(0.8),
-            fontSize: 16,
-          ),
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                fontFamily: 'Inter',
+                color: Colors.black87,
+                fontSize: 16,
+                letterSpacing: 0.0,
+              ) ?? const TextStyle(
+                color: Colors.black87,
+                fontSize: 16,
+              ),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 8),
         Text(
           'Address: ${widget.userAddress.substring(0, 6)}...${widget.userAddress.substring(widget.userAddress.length - 4)}',
-          style: TextStyle(
-            color: Colors.white.withOpacity(0.6),
-            fontSize: 14,
-            fontFamily: 'monospace',
-          ),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+                color: Colors.black54,
+                fontSize: 14,
+                letterSpacing: 0.0,
+              ) ?? const TextStyle(
+                color: Colors.black54,
+                fontSize: 14,
+                fontFamily: 'monospace',
+              ),
           textAlign: TextAlign.center,
         ),
       ],
@@ -764,18 +775,17 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
       margin: const EdgeInsets.only(bottom: 20),
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Colors.blue[50]!, Colors.blue[100]!],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
+        color: const Color(0xFF0F365F), // Blue background
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.3),
+          width: 2,
         ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.blue[200]!, width: 2),
         boxShadow: [
           BoxShadow(
-            color: Colors.blue.withOpacity(0.2),
-            blurRadius: 10,
-            offset: const Offset(0, 5),
+            color: const Color(0xFF0F365F).withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
           ),
         ],
       ),
@@ -783,28 +793,43 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
         children: [
           Container(
             padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(
-              color: Colors.white,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.2),
               shape: BoxShape.circle,
             ),
-            child: Icon(
+            child: const Icon(
               Icons.fingerprint,
               size: 56,
-              color: Colors.blue[700],
+              color: Colors.white,
             ),
           ),
           const SizedBox(height: 20),
-          const Text(
+          Text(
             'Quick Biometric Login',
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white,
+                  fontSize: 24,
+                  letterSpacing: 0.0,
+                  fontWeight: FontWeight.bold,
+                ) ?? const TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
           ),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             'Use your fingerprint or face ID\nfor instant authentication',
-            style: TextStyle(fontSize: 15, color: Colors.black87),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 15,
+                  letterSpacing: 0.0,
+                ) ?? TextStyle(
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 15,
+                ),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 24),
@@ -812,20 +837,37 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
             width: double.infinity,
             child: ElevatedButton.icon(
               onPressed: _isLoading ? null : _authenticateWithBiometric,
-              icon: const Icon(Icons.fingerprint, size: 28),
-              label: const Padding(
-                padding: EdgeInsets.all(12.0),
-                child: Text(
-                  'Authenticate with Biometric',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
+              icon: const Icon(
+                Icons.fingerprint,
+                size: 24,
+                color: Color(0xFF0F365F),
+              ),
+              label: Text(
+                'Authenticate with Biometric',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontFamily: 'Inter',
+                      color: const Color(0xFF0F365F),
+                      fontSize: 16,
+                      letterSpacing: 0.0,
+                      fontWeight: FontWeight.bold,
+                    ) ?? const TextStyle(
+                      color: Color(0xFF0F365F),
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue[700],
-                foregroundColor: Colors.white,
-                elevation: 8,
+                backgroundColor: Colors.white, // White background for contrast
+                foregroundColor: const Color(0xFF0F365F), // Blue text
+                elevation: 3,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 10,
+                ),
+                minimumSize: const Size(double.infinity, 56),
+                alignment: Alignment.center,
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
             ),
@@ -833,9 +875,19 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
           const SizedBox(height: 12),
           TextButton(
             onPressed: _goToOTPScreen,
-            child: const Text(
+            child: Text(
               'Or enter OTP code instead',
-              style: TextStyle(color: Colors.blue, fontWeight: FontWeight.w600),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontFamily: 'Inter',
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.0,
+                    decoration: TextDecoration.underline,
+                  ) ?? const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                    decoration: TextDecoration.underline,
+                  ),
             ),
           ),
         ],
@@ -846,28 +898,46 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
   Widget _buildTOTPCodeSection() {
     return Container(
       margin: const EdgeInsets.only(bottom: 20),
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF0F365F), // Blue background
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.3),
+          width: 2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F365F).withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(
+              const Icon(
                 Icons.email,
-                color: Colors.blue[700],
+                color: Colors.white,
                 size: 24,
               ),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Email Verification',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 20,
+                      letterSpacing: 0.0,
+                      fontWeight: FontWeight.bold,
+                    ) ?? const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
             ],
           ),
@@ -876,7 +946,15 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
             _userEmail.isNotEmpty 
                 ? 'We sent a code to your email\n${_maskEmail(_userEmail)}'
                 : 'Enter the 6-digit code from your email',
-            style: const TextStyle(fontSize: 14, color: Colors.black87),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                  letterSpacing: 0.0,
+                ) ?? TextStyle(
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                ),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 20),
@@ -891,25 +969,37 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
               fontSize: 24,
               fontWeight: FontWeight.bold,
               fontFamily: 'monospace',
+              color: Colors.white,
             ),
             decoration: InputDecoration(
               hintText: '000000',
+              hintStyle: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontFamily: 'monospace',
+                fontSize: 24,
+              ),
               counterText: '',
+              filled: true,
+              fillColor: Colors.white.withOpacity(0.15),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
                 borderSide: BorderSide(
-                  color: Colors.blue[700]!,
-                  width: 2,
+                  color: Colors.white.withOpacity(0.3),
+                  width: 1,
                 ),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
                 borderSide: BorderSide(
-                  color: Colors.grey[300]!,
+                  color: Colors.white.withOpacity(0.3),
                   width: 1,
+                ),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(
+                  color: Colors.white,
+                  width: 2,
                 ),
               ),
             ),
@@ -926,13 +1016,14 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: _remainingTime <= 60 
-                  ? Colors.red[50] 
-                  : Colors.blue[50],
+                  ? Colors.red[100]!.withOpacity(0.3)
+                  : Colors.white.withOpacity(0.2),
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
                 color: _remainingTime <= 60 
-                    ? Colors.red[200]! 
-                    : Colors.blue[200]!,
+                    ? Colors.red[300]! 
+                    : Colors.white.withOpacity(0.4),
+                width: 1,
               ),
             ),
             child: Row(
@@ -942,19 +1033,27 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
                   Icons.timer,
                   size: 16,
                   color: _remainingTime <= 60 
-                      ? Colors.red[600] 
-                      : Colors.blue[600],
+                      ? Colors.red[200] 
+                      : Colors.white,
                 ),
                 const SizedBox(width: 8),
                 Text(
                   'Code expires in ${_formatTime(_remainingTime)}',
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: _remainingTime <= 60 
-                        ? Colors.red[700] 
-                        : Colors.blue[700],
-                  ),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontFamily: 'Inter',
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _remainingTime <= 60 
+                            ? Colors.red[200] 
+                            : Colors.white,
+                        letterSpacing: 0.0,
+                      ) ?? TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _remainingTime <= 60 
+                            ? Colors.red[200] 
+                            : Colors.white,
+                      ),
                 ),
               ],
             ),
@@ -968,15 +1067,29 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
             children: [
               Text(
                 'Didn\'t receive code? ',
-                style: TextStyle(color: Colors.grey[600]),
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white.withOpacity(0.8),
+                      letterSpacing: 0.0,
+                    ) ?? TextStyle(
+                      color: Colors.white.withOpacity(0.8),
+                    ),
               ),
               TextButton(
                 onPressed: _isLoading || !_canResend ? null : _resendOTP,
                 child: Text(
                   _canResend ? 'Resend OTP' : 'Resend in ${_formatTime(_remainingTime)}',
-                  style: TextStyle(
-                    color: _canResend ? Colors.blue[700] : Colors.grey[400],
-                  ),
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontFamily: 'Inter',
+                        color: _canResend ? Colors.white : Colors.white.withOpacity(0.5),
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.0,
+                        decoration: _canResend ? TextDecoration.underline : null,
+                      ) ?? TextStyle(
+                        color: _canResend ? Colors.white : Colors.white.withOpacity(0.5),
+                        fontWeight: FontWeight.w600,
+                        decoration: _canResend ? TextDecoration.underline : null,
+                      ),
                 ),
               ),
             ],
@@ -990,28 +1103,43 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
             child: ElevatedButton(
               onPressed: _isLoading ? null : _verifyTOTPCode,
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue[700],
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
+                backgroundColor: Colors.white, // White background for contrast
+                foregroundColor: const Color(0xFF0F365F), // Blue text
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 16,
+                ),
+                minimumSize: const Size(double.infinity, 56),
+                alignment: Alignment.center,
+                elevation: 2,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
               child: _isLoading
-                  ? const SizedBox(
+                  ? SizedBox(
                       height: 20,
                       width: 20,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          const Color(0xFF0F365F),
+                        ),
                       ),
                     )
-                  : const Text(
+                  : Text(
                       'Verify Code',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            fontFamily: 'Inter',
+                            color: const Color(0xFF0F365F),
+                            fontSize: 16,
+                            letterSpacing: 0.0,
+                            fontWeight: FontWeight.bold,
+                          ) ?? const TextStyle(
+                            color: Color(0xFF0F365F),
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                     ),
             ),
           ),
@@ -1019,14 +1147,22 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
           const SizedBox(height: 16),
           
           // Use Backup Code Link
-          TextButton(
-            onPressed: _goToBackupCodeScreen,
-            child: const Text(
-              'Use Backup Code Instead',
-              style: TextStyle(
-                color: Colors.orange,
-                fontWeight: FontWeight.w600,
-                decoration: TextDecoration.underline,
+          Center(
+            child: TextButton(
+              onPressed: _goToBackupCodeScreen,
+              child: Text(
+                'Use Backup Code Instead',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      decoration: TextDecoration.underline,
+                      letterSpacing: 0.0,
+                    ) ?? const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      decoration: TextDecoration.underline,
+                    ),
               ),
             ),
           ),
@@ -1037,35 +1173,62 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
 
   Widget _buildBackupCodeSection() {
     return Container(
-      padding: const EdgeInsets.all(20),
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF0F365F), // Blue background
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.3),
+          width: 2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F365F).withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(
+              const Icon(
                 Icons.backup,
-                color: Colors.orange[700],
+                color: Colors.white,
                 size: 24,
               ),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Backup Code',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontFamily: 'Inter',
+                      color: Colors.white,
+                      fontSize: 20,
+                      letterSpacing: 0.0,
+                      fontWeight: FontWeight.bold,
+                    ) ?? const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          const Text(
+          Text(
             'Enter your backup code to complete verification',
-            style: TextStyle(fontSize: 14, color: Colors.black87),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'Inter',
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                  letterSpacing: 0.0,
+                ) ?? TextStyle(
+                  color: Colors.white.withOpacity(0.9),
+                  fontSize: 14,
+                ),
           ),
           const SizedBox(height: 24),
           
@@ -1077,18 +1240,35 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
               fontSize: 24,
               fontWeight: FontWeight.bold,
               fontFamily: 'monospace',
+              color: Colors.white,
             ),
             decoration: InputDecoration(
               hintText: 'Enter backup code',
-              hintStyle: TextStyle(color: Colors.grey[400]),
+              hintStyle: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontFamily: 'monospace',
+                fontSize: 24,
+              ),
+              filled: true,
+              fillColor: Colors.white.withOpacity(0.15),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.orange[300]!, width: 2),
+                borderSide: BorderSide(
+                  color: Colors.white.withOpacity(0.3),
+                  width: 1,
+                ),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(
+                  color: Colors.white.withOpacity(0.3),
+                  width: 1,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(
-                  color: Colors.orange[700]!,
+                borderSide: const BorderSide(
+                  color: Colors.white,
                   width: 2,
                 ),
               ),
@@ -1104,28 +1284,43 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
             child: ElevatedButton(
               onPressed: _isLoading ? null : _verifyBackupCode,
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange[700],
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
+                backgroundColor: Colors.white, // White background for contrast
+                foregroundColor: const Color(0xFF0F365F), // Blue text
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 16,
+                ),
+                minimumSize: const Size(double.infinity, 56),
+                alignment: Alignment.center,
+                elevation: 2,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
               child: _isLoading
-                  ? const SizedBox(
+                  ? SizedBox(
                       height: 20,
                       width: 20,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          const Color(0xFF0F365F),
+                        ),
                       ),
                     )
-                  : const Text(
+                  : Text(
                       'Verify Backup Code',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            fontFamily: 'Inter',
+                            color: const Color(0xFF0F365F),
+                            fontSize: 16,
+                            letterSpacing: 0.0,
+                            fontWeight: FontWeight.bold,
+                          ) ?? const TextStyle(
+                            color: Color(0xFF0F365F),
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                     ),
             ),
           ),
@@ -1137,35 +1332,76 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
   Widget _buildStatusMessage() {
     if (_status.isEmpty) return const SizedBox.shrink();
 
+    final isSuccess = _status.contains('successful') || _status.contains('Verification');
+    final isError = _status.contains('attempts') || _status.contains('failed');
+
     return Container(
       margin: const EdgeInsets.only(top: 20),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: _status.contains('successful') || _status.contains('Verification')
-            ? Colors.green[100]
-            : _status.contains('attempts') || _status.contains('failed')
-                ? Colors.red[100]
-                : Colors.blue[100],
-        borderRadius: BorderRadius.circular(8),
+        color: isSuccess
+            ? const Color(0xFF0F365F).withOpacity(0.1)
+            : isError
+                ? Colors.red[50]
+                : const Color(0xFF0F365F).withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: _status.contains('successful') || _status.contains('Verification')
-              ? Colors.green[300]!
-              : _status.contains('attempts') || _status.contains('failed')
+          color: isSuccess
+              ? const Color(0xFF0F365F).withOpacity(0.3)
+              : isError
                   ? Colors.red[300]!
-                  : Colors.blue[300]!,
+                  : const Color(0xFF0F365F).withOpacity(0.3),
+          width: 1.5,
         ),
       ),
-      child: Text(
-        _status,
-        style: TextStyle(
-          color: _status.contains('successful') || _status.contains('Verification')
-              ? Colors.green[800]
-              : _status.contains('attempts') || _status.contains('failed')
-                  ? Colors.red[800]
-                  : Colors.blue[800],
-          fontWeight: FontWeight.w600,
-        ),
-        textAlign: TextAlign.center,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (isSuccess)
+            Icon(
+              Icons.check_circle,
+              color: const Color(0xFF0F365F),
+              size: 20,
+            )
+          else if (isError)
+            Icon(
+              Icons.error,
+              color: Colors.red[700],
+              size: 20,
+            )
+          else
+            Icon(
+              Icons.info,
+              color: const Color(0xFF0F365F),
+              size: 20,
+            ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _status,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontFamily: 'Inter',
+                    color: isSuccess
+                        ? const Color(0xFF0F365F)
+                        : isError
+                            ? Colors.red[800]
+                            : const Color(0xFF0F365F),
+                    fontSize: 14,
+                    letterSpacing: 0.0,
+                    fontWeight: FontWeight.w600,
+                  ) ?? TextStyle(
+                    color: isSuccess
+                        ? const Color(0xFF0F365F)
+                        : isError
+                            ? Colors.red[800]
+                            : const Color(0xFF0F365F),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1176,35 +1412,66 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
     return ScaleTransition(
       scale: _scaleAnimation,
       child: Container(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
-          color: Colors.green[50],
+          color: const Color(0xFF0F365F), // Blue background
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.green[200]!),
+          border: Border.all(
+            color: Colors.white.withOpacity(0.3),
+            width: 2,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF0F365F).withOpacity(0.2),
+              blurRadius: 8,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.check_circle,
-              size: 64,
-              color: Colors.green[600],
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.check_circle,
+                size: 64,
+                color: Colors.white,
+              ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             Text(
               'Verification Successful!',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: Colors.green[800],
-              ),
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontFamily: 'Inter',
+                    color: Colors.white,
+                    fontSize: 20,
+                    letterSpacing: 0.0,
+                    fontWeight: FontWeight.bold,
+                  ) ?? const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+              textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 12),
             Text(
               'Redirecting to home screen...',
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.green[600],
-              ),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontFamily: 'Inter',
+                    color: Colors.white.withOpacity(0.9),
+                    fontSize: 14,
+                    letterSpacing: 0.0,
+                  ) ?? TextStyle(
+                    color: Colors.white.withOpacity(0.9),
+                    fontSize: 14,
+                  ),
+              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -1215,11 +1482,24 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF00163A),
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF00163A),
+        backgroundColor: const Color(0xFF0F365F),
         foregroundColor: Colors.white,
-        title: const Text('Two-Factor Authentication'),
+        title: Text(
+          'Two-Factor Authentication',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontFamily: 'Inter',
+                color: Colors.white,
+                fontSize: 20,
+                letterSpacing: 0.0,
+                fontWeight: FontWeight.w600,
+              ) ?? const TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+              ),
+        ),
         elevation: 0,
         automaticallyImplyLeading: false, // Prevent back navigation
       ),

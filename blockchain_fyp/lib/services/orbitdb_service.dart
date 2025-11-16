@@ -418,7 +418,7 @@ class OrbitDBService {
     // Public Gateways: https://dweb.link and https://ipfs.io (from IPFS Desktop config)
     final List<String> gatewayUrls = [
       'http://127.0.0.1:8081/ipfs/',      // Primary: Local IPFS Desktop gateway (localhost) - from config
-      'http://192.168.0.39:8081/ipfs/',   // Fallback: Local IPFS Desktop gateway (network IP)
+      'http://192.168.100.73:5001/ipfs/',   // Fallback: Local IPFS Desktop gateway (network IP)
       'https://dweb.link/ipfs/',          // Public gateway 1 (from IPFS Desktop config - fast)
       'https://ipfs.io/ipfs/',            // Public gateway 2 (from IPFS Desktop config - reliable)
       'https://gateway.pinata.cloud/ipfs/', // Public gateway 3 (backup)
@@ -521,6 +521,61 @@ class OrbitDBService {
     }
   }
 
+  /// Get all workspaces for a user
+  static Future<List<Map<String, dynamic>>> getUserWorkspaces(String userAddress) async {
+    try {
+      print('📋 Getting workspaces for user: $userAddress');
+      
+      final key = userAddress.toLowerCase().trim();
+      final dbName = 'workspace_$key';
+      final dbAddress = await getExistingDatabaseAddress(dbName);
+      
+      if (dbAddress == null) {
+        print('ℹ️ No workspace database found for user');
+        return [];
+      }
+      
+      final messages = await getMessages(dbAddress);
+      final workspaces = <Map<String, dynamic>>[];
+      
+      for (var message in messages) {
+        if (message['type'] == 'workspace' && 
+            message['userAddress']?.toString().toLowerCase().trim() == key) {
+          try {
+            // Parse workspaceDetails if it's a string
+            dynamic workspaceDetails = message['workspaceDetails'];
+            if (workspaceDetails is String) {
+              workspaceDetails = jsonDecode(workspaceDetails);
+            }
+            
+            workspaces.add({
+              'workspaceName': workspaceDetails['workspaceName'] ?? 
+                              workspaceDetails['name'] ?? 
+                              'Unnamed Workspace',
+              'inviterAddress': workspaceDetails['inviterAddress'] ?? key,
+              'createdAt': message['timestamp'] ?? DateTime.now().millisecondsSinceEpoch,
+              'workspaceDetails': workspaceDetails,
+            });
+          } catch (e) {
+            print('⚠️ Error parsing workspace details: $e');
+            // Add workspace with basic info
+            workspaces.add({
+              'workspaceName': 'Unnamed Workspace',
+              'inviterAddress': key,
+              'createdAt': message['timestamp'] ?? DateTime.now().millisecondsSinceEpoch,
+            });
+          }
+        }
+      }
+      
+      print('✅ Found ${workspaces.length} workspaces for user');
+      return workspaces;
+    } catch (e) {
+      print('❌ Error getting user workspaces: $e');
+      return [];
+    }
+  }
+
   // Create a database (legacy) - PLACEHOLDER
   Future<String> createDatabase(String dbName, {String dbType = 'keyvalue'}) async {
     print('🗄️ Create database placeholder: $dbName');
@@ -612,6 +667,106 @@ class OrbitDBService {
       return messages;
     } catch (e) {
       print('❌ Error getting channel messages: $e');
+      return [];
+    }
+  }
+
+  // ============ DIRECT MESSAGES ============
+
+  /// Get DM database name for two users (sorted addresses for consistency)
+  static String _getDMDatabaseName(String user1Address, String user2Address) {
+    final addr1 = user1Address.toLowerCase().trim();
+    final addr2 = user2Address.toLowerCase().trim();
+    // Sort addresses to ensure consistent database name regardless of who initiates
+    final sorted = [addr1, addr2]..sort();
+    return 'dm_${sorted[0]}_${sorted[1]}';
+  }
+
+  /// Add a direct message between two users
+  static Future<bool> addDirectMessage({
+    required String senderAddress,
+    required String receiverAddress,
+    required Map<String, dynamic> message,
+  }) async {
+    try {
+      print('💬 Add direct message: $senderAddress -> $receiverAddress');
+      
+      final dbName = _getDMDatabaseName(senderAddress, receiverAddress);
+      final address = await createChatDB(dbName);
+      
+      if (address == null) {
+        print('❌ Failed to create/get DM database');
+        return false;
+      }
+      
+      // Add message type and participants
+      final dmMessage = {
+        ...message,
+        'type': message['type'] ?? 'text',
+        'senderAddress': senderAddress.toLowerCase().trim(),
+        'receiverAddress': receiverAddress.toLowerCase().trim(),
+        'timestamp': message['timestamp'] ?? DateTime.now().millisecondsSinceEpoch,
+      };
+      
+      final result = await addMessage(address, dmMessage);
+      return result != null;
+    } catch (e) {
+      print('❌ Error adding direct message: $e');
+      return false;
+    }
+  }
+
+  /// Get all direct messages between two users
+  static Future<List<Map<String, dynamic>>> getDirectMessages({
+    required String user1Address,
+    required String user2Address,
+  }) async {
+    try {
+      print('📨 Get direct messages: $user1Address <-> $user2Address');
+      
+      final dbName = _getDMDatabaseName(user1Address, user2Address);
+      final address = await getExistingDatabaseAddress(dbName);
+      
+      if (address == null) {
+        print('ℹ️ No DM database found, returning empty list');
+        return [];
+      }
+      
+      final messages = await getMessages(address);
+      
+      // Filter messages to only include DMs between these two users
+      final filteredMessages = messages.where((msg) {
+        final sender = msg['senderAddress']?.toString().toLowerCase().trim();
+        final receiver = msg['receiverAddress']?.toString().toLowerCase().trim();
+        final user1 = user1Address.toLowerCase().trim();
+        final user2 = user2Address.toLowerCase().trim();
+        
+        return (sender == user1 && receiver == user2) ||
+               (sender == user2 && receiver == user1);
+      }).toList();
+      
+      // Convert timestamps
+      for (var message in filteredMessages) {
+        if (message['timestamp'] is int) {
+          message['timestamp'] = DateTime.fromMillisecondsSinceEpoch(message['timestamp']);
+        }
+      }
+      
+      // Sort by timestamp
+      filteredMessages.sort((a, b) {
+        final timeA = a['timestamp'] is DateTime 
+            ? a['timestamp'] as DateTime 
+            : DateTime.now();
+        final timeB = b['timestamp'] is DateTime 
+            ? b['timestamp'] as DateTime 
+            : DateTime.now();
+        return timeA.compareTo(timeB);
+      });
+      
+      print('📨 Retrieved ${filteredMessages.length} direct messages');
+      return filteredMessages;
+    } catch (e) {
+      print('❌ Error getting direct messages: $e');
       return [];
     }
   }

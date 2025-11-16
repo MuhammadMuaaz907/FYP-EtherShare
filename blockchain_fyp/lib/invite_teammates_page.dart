@@ -7,11 +7,13 @@ import 'services/invite_service.dart';
 class InviteTeammatesPage extends StatefulWidget {
   final String workspaceName;
   final String userAddress;
+  final bool isFromWorkspaceHome;
 
   const InviteTeammatesPage({
     super.key,
     required this.workspaceName,
     required this.userAddress,
+    this.isFromWorkspaceHome = false,
   });
 
   @override
@@ -27,101 +29,208 @@ class _InviteTeammatesPageState extends State<InviteTeammatesPage> {
   Widget build(BuildContext context) {
     final workspaceName = widget.workspaceName;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF1A2236),
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
-        actions: [
-          TextButton(
-            onPressed: () => _goToProjectName(context),
-            child: const Text(
-              'SKIP',
-              style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w600),
+    return GestureDetector(
+      onTap: () {
+        FocusScope.of(context).unfocus();
+        FocusManager.instance.primaryFocus?.unfocus();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          backgroundColor: Colors.white,
+          elevation: 0,
+          automaticallyImplyLeading: false,
+          leading: IconButton(
+            icon: const Icon(
+              Icons.arrow_back,
+              color: Colors.black,
+              size: 24,
+            ),
+            onPressed: () {
+              Navigator.pop(context);
+            },
+            style: IconButton.styleFrom(
+              backgroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
           ),
-        ],
-      ),
-      body: Center(
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const SizedBox(height: 32),
-                Text(
-                  'Who else is on the ${workspaceName.isNotEmpty ? workspaceName : 'your'} team?',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                const Text(
-                  'Invite your teammates to your workspace.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white70, fontSize: 16),
-                ),
-                const SizedBox(height: 32),
-                OutlinedButton.icon(
-                  key: _shareButtonKey,
-                  onPressed: _isProcessingShare ? null : _handleShareInvite,
-                  icon: _isProcessingShare
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white70,
-                          ),
-                        )
-                      : const Icon(Icons.link, color: Colors.white70),
-                  label: Text(
-                    _isProcessingShare ? 'Preparing...' : 'Share a Link',
-                    style: const TextStyle(color: Colors.white70, fontSize: 16),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Colors.white24, width: 1.2),
-                    padding: const EdgeInsets.symmetric(vertical: 18),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    backgroundColor: Colors.transparent,
-                  ),
-                ),
-                const SizedBox(height: 18),
-                OutlinedButton.icon(
-                  onPressed: _handleAddByEmail,
-                  icon: const Icon(Icons.email_outlined, color: Colors.white70),
-                  label: const Text('Add by email', style: TextStyle(color: Colors.white70, fontSize: 16)),
-                  style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Colors.white24, width: 1.2),
-                    padding: const EdgeInsets.symmetric(vertical: 18),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    backgroundColor: Colors.transparent,
-                  ),
-                ),
-                const SizedBox(height: 32),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: _hasPerformedAction ? () => _goToProjectName(context) : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _hasPerformedAction ? Colors.blueGrey[700] : Colors.blueGrey[900],
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      disabledForegroundColor: Colors.white54,
+          actions: widget.isFromWorkspaceHome
+              ? null
+              : [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8.0),
+                    child: TextButton(
+                      onPressed: () => _goToProjectName(context),
+                      child: Text(
+                        'SKIP',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontFamily: 'Inter',
+                              color: const Color(0xFF0F365F),
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.0,
+                            ) ??
+                            const TextStyle(
+                              color: Color(0xFF0F365F),
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
                     ),
-                    child: const Text('Next'),
                   ),
-                ),
-                const SizedBox(height: 24),
-              ],
+                ],
+        ),
+        body: SafeArea(
+          top: true,
+          child: Align(
+            alignment: AlignmentDirectional(0, 0),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.max,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Main Content
+                  Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const SizedBox(height: 16),
+                        Text(
+                          'Who else is on the ${workspaceName.isNotEmpty ? workspaceName : 'your'} team?',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                                fontFamily: 'Inter',
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.0,
+                              ) ?? const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                              ),
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          'Invite your teammates to your workspace.',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                fontFamily: 'Inter',
+                                letterSpacing: 0.0,
+                              ) ?? const TextStyle(
+                                fontSize: 16,
+                              ),
+                        ),
+                        const SizedBox(height: 32),
+                        
+                        // Share a Link Button
+                        SizedBox(
+                          width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
+                          child: OutlinedButton.icon(
+                            key: _shareButtonKey,
+                            onPressed: _isProcessingShare ? null : _handleShareInvite,
+                            icon: _isProcessingShare
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Color(0xFF0F365F),
+                                    ),
+                                  )
+                                : const Icon(Icons.link, color: Color(0xFF0F365F)),
+                            label: Text(
+                              _isProcessingShare ? 'Preparing...' : 'Share a Link',
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    fontFamily: 'Inter',
+                                    color: const Color(0xFF0F365F),
+                                    fontSize: 16,
+                                    letterSpacing: 0.0,
+                                  ) ?? const TextStyle(
+                                    color: Color(0xFF0F365F),
+                                    fontSize: 16,
+                                  ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(color: Color(0xFF0F365F), width: 2),
+                              padding: const EdgeInsets.symmetric(vertical: 18),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              backgroundColor: Colors.transparent,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        
+                        // Add by email Button
+                        SizedBox(
+                          width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _handleAddByEmail,
+                            icon: const Icon(Icons.email_outlined, color: Color(0xFF0F365F)),
+                            label: Text(
+                              'Add by email',
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    fontFamily: 'Inter',
+                                    color: const Color(0xFF0F365F),
+                                    fontSize: 16,
+                                    letterSpacing: 0.0,
+                                  ) ?? const TextStyle(
+                                    color: Color(0xFF0F365F),
+                                    fontSize: 16,
+                                  ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(color: Color(0xFF0F365F), width: 2),
+                              padding: const EdgeInsets.symmetric(vertical: 18),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              backgroundColor: Colors.transparent,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 32),
+                        
+                        // Next/Done Button
+                        SizedBox(
+                          width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
+                          height: 44,
+                          child: FilledButton(
+                            onPressed: widget.isFromWorkspaceHome
+                                ? () => _handleDone(context)
+                                : (_hasPerformedAction ? () => _goToProjectName(context) : null),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF0F365F),
+                              foregroundColor: Colors.white,
+                              padding: EdgeInsetsDirectional.fromSTEB(0, 0, 0, 0),
+                              elevation: 3,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              disabledBackgroundColor: const Color(0xFF0F365F),
+                              disabledForegroundColor: Colors.white.withOpacity(0.6),
+                            ),
+                            child: Text(
+                              widget.isFromWorkspaceHome ? 'Done' : 'Next',
+                              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                    fontFamily: 'Inter',
+                                    color: Colors.white,
+                                    letterSpacing: 0.0,
+                                  ) ?? const TextStyle(
+                                    fontSize: 16,
+                                    color: Colors.white,
+                                  ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -233,6 +342,11 @@ class _InviteTeammatesPageState extends State<InviteTeammatesPage> {
         ),
       ),
     );
+  }
+
+  void _handleDone(BuildContext context) {
+    // Navigate back to workspace home
+    Navigator.pop(context, true); // Return true to indicate members were added
   }
 
   void _markActionCompleted() {

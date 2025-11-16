@@ -8,7 +8,7 @@ class IPFSService {
   final List<String> ipfsApiUrls = [
     'http://127.0.0.1:5001/api/v0',     // Primary: Localhost (most reliable)
     'http://localhost:5001/api/v0',     // Alternative localhost
-    'http://192.168.0.39:5001/api/v0',  // Fallback: Network IP (if localhost fails)
+    'http://192.168.100.73:5001/api/v0',  // Fallback: Network IP (if localhost fails)
   ];
 
   Future<String> uploadFileToIPFS(File file) async {

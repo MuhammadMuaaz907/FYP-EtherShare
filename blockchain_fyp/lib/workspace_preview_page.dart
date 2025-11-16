@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'workspace_home_page.dart';
 import 'services/orbitdb_service.dart';
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class ChannelPreviewPage extends StatelessWidget {
   final String workspaceName;
@@ -16,321 +15,306 @@ class ChannelPreviewPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF1A2236),
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
-      ),
-      body: Center(
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const SizedBox(height: 32),
-                Text(
-                  "Tada! Meet your team's first channel: #${channelName.isNotEmpty ? channelName : 'Work'}",
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
+    return GestureDetector(
+      onTap: () {
+        FocusScope.of(context).unfocus();
+        FocusManager.instance.primaryFocus?.unfocus();
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFF1284E4),
+        body: SafeArea(
+          top: true,
+          child: Row(
+            mainAxisSize: MainAxisSize.max,
+            children: [
+              Expanded(
+                flex: 8,
+                child: Container(
+                  width: 100,
+                  height: double.infinity,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF1284E4),
                   ),
-                ),
-                const SizedBox(height: 32),
-                // Mockup phone screen
-                Container(
-                  width: 280,
-                  height: 400,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.2),
-                        blurRadius: 15,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    children: [
-                      // Top bar
-                      Container(
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: Colors.grey[200],
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(20),
-                            topRight: Radius.circular(20),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            const Padding(
-                              padding: EdgeInsets.only(left: 16),
-                              child:
-                                  Text('1:32', style: TextStyle(fontSize: 14)),
+                  alignment: AlignmentDirectional(0, -1),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.max,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          height: 75.58,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF1284E4),
+                            borderRadius: BorderRadius.only(
+                              bottomLeft: Radius.circular(16),
+                              bottomRight: Radius.circular(16),
+                              topLeft: Radius.circular(0),
+                              topRight: Radius.circular(0),
                             ),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.tag, size: 16),
-                            const Icon(Icons.arrow_back, size: 16),
-                            const Spacer(),
-                            const Icon(Icons.search, size: 16),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.info_outline, size: 16),
-                            const SizedBox(width: 16),
-                          ],
+                          ),
+                          alignment: AlignmentDirectional(-1, 0),
                         ),
-                      ),
-                      // Chat content
-                      Expanded(
-                        child: Container(
-                          color: Colors.white,
+                        Align(
+                          alignment: AlignmentDirectional(0, 0),
                           child: Padding(
-                            padding: const EdgeInsets.all(16),
+                            padding: const EdgeInsets.all(32),
                             child: Column(
+                              mainAxisSize: MainAxisSize.max,
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                // Messages
-                                _buildMessage(
-                                    'Hey team! How\'s the project going?',
-                                    Colors.yellow),
-                                _buildReactions(),
-                                const SizedBox(height: 8),
-                                _buildMessage('Great progress on the frontend!',
-                                    Colors.pink),
-                                _buildMessage('Backend API is almost ready',
-                                    Colors.green),
-                                _buildMessage(
-                                    'Design review scheduled for tomorrow',
-                                    Colors.grey),
-                                _buildMessage(
-                                    'Meeting notes from today\'s standup',
-                                    Colors.lightBlue),
-                                _buildAttachment(),
-                                const SizedBox(height: 8),
-                                _buildMessage(
-                                    'Thanks everyone!', Colors.yellow),
+                                Align(
+                                  alignment: AlignmentDirectional(0, 0),
+                                  child: Text(
+                                    'Hurray! Everthing done',
+                                    textAlign: TextAlign.center,
+                                    maxLines: 2,
+                                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                                          fontFamily: 'Inter',
+                                          color: Colors.white,
+                                          fontSize: 28,
+                                          letterSpacing: 0.0,
+                                          fontWeight: FontWeight.bold,
+                                        ) ?? const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 28,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                Align(
+                                  alignment: AlignmentDirectional(0, 0),
+                                  child: Text(
+                                    " Meet your team's first channel: #${channelName.isNotEmpty ? channelName : 'Work'} ",
+                                    textAlign: TextAlign.center,
+                                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                          fontFamily: 'Inter',
+                                          color: Colors.white,
+                                          fontSize: 20,
+                                          letterSpacing: 0.0,
+                                          fontWeight: FontWeight.w500,
+                                        ) ?? const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                  ),
+                                ),
+                                const SizedBox(height: 24),
+                                Align(
+                                  alignment: AlignmentDirectional(0, 0),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Image.network(
+                                      'https://storage.googleapis.com/flutterflow-io-6f20.appspot.com/projects/ether-4gst3t/assets/txhdyp1lfn7e/Channel.png',
+                                      width: 400,
+                                      height: 300,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (context, error, stackTrace) {
+                                        // Fallback to a placeholder if image fails
+                                        return Container(
+                                          width: 400,
+                                          height: 300,
+                                          decoration: BoxDecoration(
+                                            color: Colors.white.withOpacity(0.2),
+                                            borderRadius: BorderRadius.circular(8),
+                                          ),
+                                          child: const Icon(
+                                            Icons.chat_bubble_outline,
+                                            size: 80,
+                                            color: Colors.white,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ),
+                                Align(
+                                  alignment: AlignmentDirectional(0, 0),
+                                  child: Padding(
+                                    padding: const EdgeInsetsDirectional.fromSTEB(0, 12, 0, 24),
+                                    child: Text(
+                                      'A channel brings together every part of your project so your team can get more done',
+                                      textAlign: TextAlign.center,
+                                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                            fontFamily: 'Inter',
+                                            color: Colors.white,
+                                            letterSpacing: 0.0,
+                                          ) ?? const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                          ),
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 0, 16),
+                                  child: SizedBox(
+                                    width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
+                                    height: 44,
+                                    child: FilledButton(
+                                      onPressed: () async {
+                                        // Save workspace for user in OrbitDB
+                                        final key = userAddress.toLowerCase().trim();
+                                        final workspaceDetails = jsonEncode({
+                                          'workspaceName': workspaceName,
+                                          'channelName': channelName,
+                                        });
+                                        print(
+                                            'Saving workspace for key: $key, value: $workspaceDetails');
+                                        final success = await OrbitDBService.saveWorkspaceForUser(key, workspaceDetails);
+                                        print('Workspace save result: $success');
+                                        print('📌 Workspace database address cached for future use');
+                                        
+                                        // Add the creator as the first member (inviter) of the workspace
+                                        try {
+                                          // Get creator's display name from profile
+                                          String? creatorDisplayName;
+                                          final profileDbName = 'profile_$key';
+                                          final profileDbAddress = await OrbitDBService.getExistingDatabaseAddress(profileDbName);
+                                          if (profileDbAddress != null) {
+                                            final profileMessages = await OrbitDBService.getMessages(profileDbAddress);
+                                            for (var msg in profileMessages) {
+                                              if (msg['type'] == 'profile' && msg['userAddress']?.toString().toLowerCase() == key) {
+                                                creatorDisplayName = msg['username']?.toString();
+                                                break;
+                                              }
+                                            }
+                                          }
+                                          
+                                          await OrbitDBService.addWorkspaceMember(
+                                            inviterAddress: key,
+                                            memberAddress: key,
+                                            workspaceName: workspaceName,
+                                            memberDisplayName: creatorDisplayName,
+                                          );
+                                          print('✅ Creator added as workspace member');
+                                        } catch (e) {
+                                          print('⚠️ Failed to add creator as member: $e');
+                                          // Continue anyway since workspace was saved
+                                        }
+                                        
+                                        // Save the initial channel to OrbitDB
+                                        try {
+                                          if (channelName.isNotEmpty && channelName.toLowerCase() != 'work') {
+                                            final workspaceDbName = 'workspace_$key';
+                                            var dbAddress = await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
+                                            
+                                            if (dbAddress == null) {
+                                              dbAddress = await OrbitDBService.createChatDB(workspaceDbName);
+                                            }
+                                            
+                                            if (dbAddress != null) {
+                                              // Check if channel already exists
+                                              final messages = await OrbitDBService.getMessages(dbAddress);
+                                              final channelExists = messages.any((msg) =>
+                                                  msg['type'] == 'channel' &&
+                                                  msg['workspaceName'] == workspaceName &&
+                                                  msg['channelName']?.toString().toLowerCase() == channelName.toLowerCase());
+                                              
+                                              if (!channelExists) {
+                                                // Create channel message
+                                                final channelMessage = {
+                                                  'type': 'channel',
+                                                  'workspaceName': workspaceName,
+                                                  'channelName': channelName,
+                                                  'createdBy': key,
+                                                  'inviterAddress': key,
+                                                  'timestamp': DateTime.now().millisecondsSinceEpoch,
+                                                };
+                                                
+                                                // Save channel to workspace database
+                                                final result = await OrbitDBService.addMessage(dbAddress, channelMessage);
+                                                if (result != null) {
+                                                  print('✅ Initial channel "$channelName" saved to OrbitDB');
+                                                  
+                                                  // Create channel database for messages
+                                                  final channelDbName = 'channel_${key}_${workspaceName}_$channelName';
+                                                  final channelDbAddress = await OrbitDBService.createChatDB(channelDbName);
+                                                  if (channelDbAddress != null) {
+                                                    print('✅ Channel database created: $channelDbName');
+                                                  }
+                                                }
+                                              } else {
+                                                print('ℹ️ Initial channel "$channelName" already exists in database');
+                                              }
+                                            }
+                                          }
+                                        } catch (e) {
+                                          print('⚠️ Failed to save initial channel: $e');
+                                          // Continue anyway - it will be saved when TeamHomePage loads
+                                        }
+                                        
+                                        // No need to save to SharedPreferences - all data is now in OrbitDB
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) => TeamHomePage(
+                                              workspaceName: workspaceName,
+                                              channelName: channelName,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      style: FilledButton.styleFrom(
+                                        backgroundColor: const Color(0xFF0F365F),
+                                        foregroundColor: Colors.white,
+                                        padding: EdgeInsetsDirectional.fromSTEB(0, 0, 0, 0),
+                                        elevation: 3,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        'See your channel in EtherShare',
+                                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                              fontFamily: 'Inter',
+                                              color: Colors.white,
+                                              letterSpacing: 0.0,
+                                            ) ?? const TextStyle(
+                                              fontSize: 16,
+                                              color: Colors.white,
+                                            ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                           ),
                         ),
-                      ),
-                      // Bottom navigation
-                      Container(
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: Colors.grey[200],
-                          borderRadius: const BorderRadius.only(
-                            bottomLeft: Radius.circular(20),
-                            bottomRight: Radius.circular(20),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            const Padding(
-                              padding: EdgeInsets.only(left: 16),
-                              child: Icon(Icons.arrow_back, size: 16),
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              width: 20,
-                              height: 2,
-                              color: Colors.grey[600],
-                            ),
-                            const Spacer(),
-                            const Icon(Icons.flash_on, size: 16),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.camera_alt, size: 16),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.photo_library, size: 16),
-                            const SizedBox(width: 16),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 32),
-                const Text(
-                  'A channel brings together every part of your project so your team can get more done.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white70, fontSize: 16),
-                ),
-                const SizedBox(height: 32),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () async {
-                      // Save workspace for user in OrbitDB
-                      final key = userAddress.toLowerCase().trim();
-                      final workspaceDetails = jsonEncode({
-                        'workspaceName': workspaceName,
-                        'channelName': channelName,
-                      });
-                      print(
-                          'Saving workspace for key: $key, value: $workspaceDetails');
-                      final success = await OrbitDBService.saveWorkspaceForUser(key, workspaceDetails);
-                      print('Workspace save result: $success');
-                      print('📌 Workspace database address cached for future use');
-                      
-                      // Add the creator as the first member (inviter) of the workspace
-                      try {
-                        // Get creator's display name from profile
-                        String? creatorDisplayName;
-                        final profileDbName = 'profile_$key';
-                        final profileDbAddress = await OrbitDBService.getExistingDatabaseAddress(profileDbName);
-                        if (profileDbAddress != null) {
-                          final profileMessages = await OrbitDBService.getMessages(profileDbAddress);
-                          for (var msg in profileMessages) {
-                            if (msg['type'] == 'profile' && msg['userAddress']?.toString().toLowerCase() == key) {
-                              creatorDisplayName = msg['username']?.toString();
-                              break;
-                            }
-                          }
-                        }
-                        
-                        await OrbitDBService.addWorkspaceMember(
-                          inviterAddress: key,
-                          memberAddress: key,
-                          workspaceName: workspaceName,
-                          memberDisplayName: creatorDisplayName,
-                        );
-                        print('✅ Creator added as workspace member');
-                      } catch (e) {
-                        print('⚠️ Failed to add creator as member: $e');
-                        // Continue anyway since workspace was saved
-                      }
-                      
-                      // No need to save to SharedPreferences - all data is now in OrbitDB
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => TeamHomePage(
-                            workspaceName: workspaceName,
-                            channelName: channelName,
-                          ),
-                        ),
-                      );
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF23C16B),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      textStyle: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10)),
+                      ],
                     ),
-                    child: const Text('See your channel in EtherShare'),
                   ),
                 ),
-                const SizedBox(height: 24),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMessage(String text, Color userColor) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 4,
-            height: 16,
-            decoration: BoxDecoration(
-              color: userColor,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Container(
-              height: 12,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(6),
               ),
-            ),
+              if (MediaQuery.of(context).size.width > 768)
+                Expanded(
+                  flex: 6,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Container(
+                      width: 100,
+                      height: double.infinity,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        image: const DecorationImage(
+                          fit: BoxFit.cover,
+                          image: NetworkImage(
+                            'https://images.unsplash.com/photo-1514924013411-cbf25faa35bb?ixlib=rb-4.0.3&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1380&q=80',
+                          ),
+                        ),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildReactions() {
-    return Padding(
-      padding: const EdgeInsets.only(left: 12, bottom: 8),
-      child: Row(
-        children: [
-          _buildReaction(Icons.star, '7'),
-          const SizedBox(width: 4),
-          _buildReaction(Icons.thumb_up, '5'),
-          const SizedBox(width: 4),
-          _buildReaction(Icons.lightbulb, '4'),
-          const SizedBox(width: 4),
-          _buildReaction(Icons.favorite, '1'),
-          const SizedBox(width: 4),
-          _buildReaction(Icons.person, ''),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildReaction(IconData icon, String count) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: Colors.grey[200],
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 12, color: Colors.grey[600]),
-          if (count.isNotEmpty) ...[
-            const SizedBox(width: 2),
-            Text(count,
-                style: TextStyle(fontSize: 10, color: Colors.grey[600])),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAttachment() {
-    return Padding(
-      padding: const EdgeInsets.only(left: 12, bottom: 8),
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey[200],
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.description, size: 16, color: Colors.grey),
-            const SizedBox(width: 8),
-            Container(
-              width: 60,
-              height: 8,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(4),
-              ),
-            ),
-          ],
         ),
       ),
     );
   }
+
 }
