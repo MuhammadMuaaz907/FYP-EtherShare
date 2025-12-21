@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'invite_teammates_page.dart';
+import 'services/distributed_service.dart';
 
 class WorkspaceNamePage extends StatefulWidget {
   final String userAddress;
@@ -13,6 +14,8 @@ class WorkspaceNamePage extends StatefulWidget {
 class _WorkspaceNamePageState extends State<WorkspaceNamePage> {
   final TextEditingController _controller = TextEditingController();
   bool _isButtonEnabled = false;
+  bool _isChecking = false;
+  String? _errorMessage;
 
   @override
   void initState() {
@@ -20,8 +23,26 @@ class _WorkspaceNamePageState extends State<WorkspaceNamePage> {
     _controller.addListener(() {
       setState(() {
         _isButtonEnabled = _controller.text.trim().isNotEmpty;
+        _errorMessage = null; // Clear error when user types
       });
     });
+  }
+  
+  Future<bool> _checkDuplicateWorkspace(String workspaceName) async {
+    try {
+      final existingWorkspaces = await DistributedService.getUserWorkspaces(widget.userAddress);
+      final normalizedInput = workspaceName.trim().toLowerCase();
+      
+      final duplicateWorkspace = existingWorkspaces.firstWhere(
+        (ws) => (ws['name']?.toString() ?? '').trim().toLowerCase() == normalizedInput,
+        orElse: () => <String, dynamic>{},
+      );
+      
+      return duplicateWorkspace.isNotEmpty;
+    } catch (e) {
+      print('⚠️ Error checking duplicate workspace: $e');
+      return false; // Allow creation if check fails (backend will catch it)
+    }
   }
 
   @override
@@ -200,6 +221,37 @@ class _WorkspaceNamePageState extends State<WorkspaceNamePage> {
                                   ),
                                 ),
                                 
+                                // Error Message
+                                if (_errorMessage != null)
+                                  Padding(
+                                    padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 0, 16),
+                                    child: Container(
+                                      width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.red[50],
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: Colors.red[300]!),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(Icons.error_outline, color: Colors.red[700], size: 20),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              _errorMessage!,
+                                              style: TextStyle(
+                                                color: Colors.red[700],
+                                                fontSize: 14,
+                                                fontFamily: 'Inter',
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                
                                 // Next Button
                                 Padding(
                                   padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 0, 16),
@@ -207,17 +259,45 @@ class _WorkspaceNamePageState extends State<WorkspaceNamePage> {
                                     width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
                                     height: 44,
                                     child: FilledButton(
-                                      onPressed: _isButtonEnabled
-                                          ? () {
-                                              Navigator.push(
-                                                context,
-                                                MaterialPageRoute(
-                                                  builder: (_) => InviteTeammatesPage(
-                                                    workspaceName: _controller.text.trim(),
-                                                    userAddress: widget.userAddress,
+                                      onPressed: (_isButtonEnabled && !_isChecking)
+                                          ? () async {
+                                              final workspaceName = _controller.text.trim();
+                                              
+                                              if (workspaceName.isEmpty) {
+                                                return;
+                                              }
+                                              
+                                              setState(() {
+                                                _isChecking = true;
+                                                _errorMessage = null;
+                                              });
+                                              
+                                              // Check for duplicate workspace name
+                                              final isDuplicate = await _checkDuplicateWorkspace(workspaceName);
+                                              
+                                              if (mounted) {
+                                                setState(() {
+                                                  _isChecking = false;
+                                                });
+                                                
+                                                if (isDuplicate) {
+                                                  setState(() {
+                                                    _errorMessage = 'You already have a workspace named "$workspaceName". Please choose a different name.';
+                                                  });
+                                                  return;
+                                                }
+                                                
+                                                // Navigate to next page
+                                                Navigator.push(
+                                                  context,
+                                                  MaterialPageRoute(
+                                                    builder: (_) => InviteTeammatesPage(
+                                                      workspaceName: workspaceName,
+                                                      userAddress: widget.userAddress,
+                                                    ),
                                                   ),
-                                                ),
-                                              );
+                                                );
+                                              }
                                             }
                                           : null,
                                       style: FilledButton.styleFrom(
@@ -231,17 +311,26 @@ class _WorkspaceNamePageState extends State<WorkspaceNamePage> {
                                         disabledBackgroundColor: Colors.grey[300],
                                         disabledForegroundColor: Colors.grey[600],
                                       ),
-                                      child: Text(
-                                        'Next',
-                                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                                              fontFamily: 'Inter',
-                                              color: Colors.white,
-                                              letterSpacing: 0.0,
-                                            ) ?? const TextStyle(
-                                              fontSize: 16,
-                                              color: Colors.white,
+                                      child: _isChecking
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: Colors.white,
+                                              ),
+                                            )
+                                          : Text(
+                                              'Next',
+                                              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                                    fontFamily: 'Inter',
+                                                    color: Colors.white,
+                                                    letterSpacing: 0.0,
+                                                  ) ?? const TextStyle(
+                                                    fontSize: 16,
+                                                    color: Colors.white,
+                                                  ),
                                             ),
-                                      ),
                                     ),
                                   ),
                                 ),

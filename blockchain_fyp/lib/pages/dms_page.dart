@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../services/orbitdb_service.dart';
+import '../services/session_service.dart';
 
 class DMsPage extends StatefulWidget {
   final String workspaceName;
@@ -39,7 +39,7 @@ class _DMsPageState extends State<DMsPage> {
 
   Future<void> _loadUserAddress() async {
     try {
-      final session = await OrbitDBService.getLoginSession();
+      final session = await SessionService.getLoginSession();
       userAddress = session['userAddress'];
     } catch (e) {
       print('❌ Error loading user address: $e');

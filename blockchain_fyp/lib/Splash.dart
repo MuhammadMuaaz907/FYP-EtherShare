@@ -6,7 +6,7 @@ import 'ProfileSetup.dart';
 import 'workspace_preview_page.dart';
 import 'workspace_home_page.dart';
 import 'services/contract_service.dart';
-import 'services/orbitdb_service.dart';
+import 'services/session_service.dart';
 
 
 class SplashScreen extends StatefulWidget {
@@ -75,8 +75,8 @@ class _SplashScreenState extends State<SplashScreen>
     try {
       print('🔍 Checking user session...');
       
-      // Check if user is logged in
-      final session = await OrbitDBService.getLoginSession();
+      // Check if user is logged in using SessionService
+      final session = await SessionService.getLoginSession();
       
       if (session['isLoggedIn'] == 'true') {
         final userAddress = session['userAddress'];

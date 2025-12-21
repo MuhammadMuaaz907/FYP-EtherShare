@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'screens/accept_invite_screen.dart';
 import 'services/invite_link_manager.dart';
 import 'services/invite_service.dart';
+import 'services/distributed_service.dart';
 import 'workspace_name_page.dart';
 
 class CreateWorkspacePage extends StatefulWidget {
@@ -395,15 +396,28 @@ class _CreateWorkspacePageState extends State<CreateWorkspacePage> {
       return;
     }
 
-    final parsed = InviteLinkManager.parseLink(link);
+    // Clean the link - remove any extra whitespace
+    final cleanedLink = link.trim().replaceAll(RegExp(r'\s+'), ' ');
+    
+    print('🔗 Processing invite link: $cleanedLink');
+
+    final parsed = InviteLinkManager.parseLink(cleanedLink);
     if (parsed == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Ye link valid nahin lag raha.'),
-        ),
-      );
+      print('❌ Failed to parse invite link');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Ye link valid nahin lag raha. Please check the link format.'),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
       return;
     }
+
+    print('✅ Link parsed successfully:');
+    print('   Workspace Slug: ${parsed.workspaceSlug}');
+    print('   Inviter: ${parsed.inviterAddress}');
 
     setState(() {
       _isJoining = true;
@@ -411,6 +425,24 @@ class _CreateWorkspacePageState extends State<CreateWorkspacePage> {
 
     try {
       await InviteLinkManager.instance.setPendingInvite(parsed);
+      
+      // Check backend connection first
+      final isBackendOnline = await DistributedService.checkHealth();
+      if (!isBackendOnline) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Backend server connect nahi ho raha. Please check your connection.'),
+              duration: Duration(seconds: 4),
+            ),
+          );
+          setState(() {
+            _isJoining = false;
+          });
+        }
+        return;
+      }
+      
       final resolved = await InviteService.resolveInvite(parsed);
 
       if (!mounted) {
@@ -418,16 +450,32 @@ class _CreateWorkspacePageState extends State<CreateWorkspacePage> {
       }
 
       if (resolved == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Ye invite abhi kaam nahin kar raha. Admin se link dobara mang lo.'),
-          ),
-        );
+        print('❌ Failed to resolve invite');
+        print('   Parsed data: workspaceSlug=${parsed.workspaceSlug}, inviter=${parsed.inviterAddress}');
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Ye workspace invite link valid nahi hai ya workspace exist nahi karta.\n\n'
+                'Please verify:\n'
+                '1. Link sahi hai (complete URL)\n'
+                '2. Workspace exist karta hai\n'
+                '3. Admin se naya link mangain',
+              ),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
         setState(() {
           _isJoining = false;
         });
         return;
       }
+
+      print('✅ Invite resolved successfully:');
+      print('   Workspace: ${resolved.workspaceName}');
+      print('   Channel: ${resolved.channelName}');
 
       await Navigator.push(
         context,

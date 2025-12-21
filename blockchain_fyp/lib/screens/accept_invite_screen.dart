@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/invite_service.dart';
-import '../services/orbitdb_service.dart';
+import '../services/session_service.dart';
 import '../workspace_home_page.dart';
 
 class AcceptInviteScreen extends StatefulWidget {
@@ -372,7 +372,7 @@ class _AcceptInviteScreenState extends State<AcceptInviteScreen> {
         throw Exception('Unable to save workspace for your account.');
       }
 
-      await OrbitDBService.saveLoginSession(
+      await SessionService.saveLoginSession(
         widget.userAddress,
         widget.invite.workspaceName,
         widget.invite.channelName,

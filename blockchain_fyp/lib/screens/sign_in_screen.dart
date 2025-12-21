@@ -1,12 +1,13 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:provider/provider.dart';
 import '../services/contract_service.dart';
-import '../services/orbitdb_service.dart';
+import '../services/session_service.dart';
+import '../services/distributed_service.dart';
 import '../ProfileSetup.dart';
 import 'package:web3dart/web3dart.dart';
 import '../workspace_home_page.dart';
-import 'dart:convert';
 import '../services/secure_storage_service.dart';
 import 'verify_2fa_screen.dart';
 import '../screens/sign_up_screen.dart';
@@ -23,29 +24,55 @@ class _SignInScreenState extends State<SignInScreen> {
   final FocusNode _privateKeyFocusNode = FocusNode();
   String _status = '';
   bool _isLoading = false;
+  bool _isProcessing = false; // Prevent multiple simultaneous sign-in attempts
 
   bool _isDesktop(BuildContext context) {
     return MediaQuery.of(context).size.width > 768;
   }
 
+  /// Safely updates state only if widget is still mounted
+  void _safeSetState(VoidCallback fn) {
+    if (mounted) {
+      setState(fn);
+    }
+  }
+
   Future<void> _signIn() async {
+    // Prevent multiple simultaneous calls
+    if (_isProcessing) {
+      print('⚠️ Sign-in already in progress, ignoring duplicate call');
+      return;
+    }
+
     final privateKey = _privateKeyController.text.trim();
     
     if (privateKey.isEmpty) {
-      setState(() {
+      _safeSetState(() {
         _status = 'Please enter your private key';
       });
       return;
     }
 
-    setState(() {
+    // Validate private key format
+    if (privateKey.length < 64) {
+      _safeSetState(() {
+        _status = 'Invalid private key format';
+        _isLoading = false;
+      });
+      return;
+    }
+
+    // Set processing flag and loading state
+    _isProcessing = true;
+    _safeSetState(() {
       _isLoading = true;
       _status = 'Signing in...';
     });
 
     final contractService = Provider.of<ContractService?>(context, listen: false);
     if (contractService == null) {
-      setState(() {
+      _isProcessing = false;
+      _safeSetState(() {
         _status = 'Contract service not initialized';
         _isLoading = false;
       });
@@ -53,60 +80,159 @@ class _SignInScreenState extends State<SignInScreen> {
     }
 
     try {
+      // Validate and extract address from private key
       final credentials = EthPrivateKey.fromHex(
         privateKey.startsWith('0x') ? privateKey.substring(2) : privateKey,
       );
       final address = credentials.address.hex;
       
-      final isRegistered = await contractService.isRegistered(address);
-      final hasProfile = await contractService.hasCompletedProfile(address);
-      final workspaceExists = await contractService.doesWorkspaceExist(address);
+      print('🔐 Starting sign-in process for address: $address');
+      
+      // Step 1: Check registration with timeout
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      _safeSetState(() {
+        _status = 'Verifying account...';
+      });
+      
+      final isRegistered = await contractService.isRegistered(address).timeout(
+        const Duration(seconds: 12),
+        onTimeout: () {
+          throw TimeoutException('Connection timeout. Please check your network connection.');
+        },
+      );
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      if (!isRegistered) {
+        _isProcessing = false;
+        _safeSetState(() {
+          _status = 'Account not found. Please sign up first.';
+          _isLoading = false;
+        });
+        return;
+      }
+      
+      // Step 2: Check profile and workspace in parallel for better performance
+      _safeSetState(() {
+        _status = 'Checking profile...';
+      });
+      
+      bool hasProfile = false;
+      bool workspaceExists = false;
+      
+      // Run profile and workspace checks in parallel
+      try {
+        final results = await Future.wait<bool>([
+          contractService.hasCompletedProfile(address).timeout(
+            const Duration(seconds: 8),
+            onTimeout: () => false,
+          ).catchError((e) {
+            print('⚠️ Profile check error: $e');
+            return false;
+          }),
+          contractService.doesWorkspaceExist(address).timeout(
+            const Duration(seconds: 8),
+            onTimeout: () => false,
+          ).catchError((e) {
+            print('⚠️ Workspace check error: $e');
+            return false;
+          }),
+        ]);
+        
+        hasProfile = results[0];
+        workspaceExists = results[1];
+      } catch (e) {
+        print('⚠️ Error checking profile/workspace: $e');
+        hasProfile = false;
+        workspaceExists = false;
+      }
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
       
       print('🔍 Sign In Debug Info:');
       print('  - isRegistered: $isRegistered');
       print('  - hasProfile: $hasProfile');
       print('  - workspaceExists: $workspaceExists');
       
-      // If user is registered, has profile, and has workspace, check 2FA first
-      if (isRegistered && hasProfile && workspaceExists) {
-        print('✅ All checks passed - checking 2FA status...');
+      // Step 3: Handle incomplete profile/workspace
+      if (!hasProfile || !workspaceExists) {
+        print('⚠️ User registered but profile/workspace incomplete');
+        _isProcessing = false;
+        _safeSetState(() {
+          _status = 'Completing setup...';
+          _isLoading = false;
+        });
         
-        SecureStorageService? storageService;
-        bool is2FAEnabled = false;
-        try {
-          storageService = await SecureStorageService.create();
-          is2FAEnabled = await storageService.isUser2FAEnabled();
-          print('🔐 2FA Status: ${is2FAEnabled ? "ENABLED" : "DISABLED"}');
-        } catch (e) {
-          print('⚠️ Error checking 2FA status: $e');
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ProfileSetupScreen(
+                address: address,
+                show2FASetup: true,
+              ),
+            ),
+          );
         }
+        return;
+      }
+      
+      // Step 4: Check 2FA status
+      _safeSetState(() {
+        _status = 'Checking security settings...';
+      });
+      
+      SecureStorageService? storageService;
+      bool is2FAEnabled = false;
+      try {
+        storageService = await SecureStorageService.create();
+        is2FAEnabled = await storageService.isUser2FAEnabled();
+        print('🔐 2FA Status: ${is2FAEnabled ? "ENABLED" : "DISABLED"}');
+      } catch (e) {
+        print('⚠️ Error checking 2FA status: $e');
+        is2FAEnabled = false;
+      }
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      // Step 5: Handle 2FA or direct login
+      if (is2FAEnabled) {
+        print('🔐 2FA is enabled - navigating to verification screen');
+        _isProcessing = false;
+        _safeSetState(() {
+          _status = '2FA verification required...';
+          _isLoading = false;
+        });
         
-        if (is2FAEnabled) {
-          print('🔐 2FA is enabled - navigating to verification screen');
-          setState(() {
-            _status = '2FA verification required...';
-            _isLoading = false;
-          });
+        if (mounted) {
+          String? userEmail;
+          try {
+            final profile = await DistributedService.getUserProfile(address).timeout(
+              const Duration(seconds: 8),
+              onTimeout: () => null,
+            ).catchError((e) {
+              print('⚠️ Error fetching user email: $e');
+              return null;
+            });
+            userEmail = profile?['email']?.toString();
+          } catch (e) {
+            print('⚠️ Error fetching user email: $e');
+          }
           
           if (mounted) {
-            String? userEmail;
-            try {
-              final key = address.toLowerCase().trim();
-              final dbName = 'profile_$key';
-              final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-              if (dbAddress != null) {
-                final messages = await OrbitDBService.getMessages(dbAddress);
-                for (var message in messages) {
-                  if (message['type'] == 'profile' && message['userAddress'] == key) {
-                    userEmail = message['email']?.toString();
-                    break;
-                  }
-                }
-              }
-            } catch (e) {
-              print('Error fetching user email: $e');
-            }
-            
             Navigator.pushReplacement(
               context,
               MaterialPageRoute(
@@ -118,79 +244,75 @@ class _SignInScreenState extends State<SignInScreen> {
               ),
             );
           }
-          return;
-        }
-        
-        print('✅ 2FA not enabled - redirecting to workspace');
-        setState(() {
-          _status = 'Sign in successful! Redirecting...';
-          _isLoading = false;
-        });
-        
-        if (mounted) {
-          String workspaceName = 'YourWorkspace';
-          String channelName = 'general';
-          
-          try {
-            final key = address.toLowerCase().trim();
-            final dbName = 'workspace_$key';
-            final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-            
-            if (dbAddress != null) {
-              final messages = await OrbitDBService.getMessages(dbAddress);
-              for (var message in messages) {
-                if (message['type'] == 'workspace' && message['userAddress'] == key) {
-                  final workspaceDetails = jsonDecode(message['workspaceDetails']);
-                  workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
-                  channelName = workspaceDetails['channelName'] ?? channelName;
-                  break;
-                }
-              }
-            }
-          } catch (e) {
-            print('Error fetching workspace details: $e');
-          }
-          
-          await OrbitDBService.saveLoginSession(address, workspaceName, channelName);
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => TeamHomePage(
-                workspaceName: workspaceName,
-                channelName: channelName,
-              ),
-            ),
-          );
         }
         return;
       }
       
-      // If user is registered but doesn't have profile or workspace
-      if (isRegistered && (!hasProfile || !workspaceExists)) {
-        setState(() {
-          _status = 'Completing setup...';
-          _isLoading = false;
-        });
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => ProfileSetupScreen(
-              address: address,
-              show2FASetup: true, // Enable 2FA setup flow after profile completion
-            )),
-          );
-        }
-        return;
-      }
-      
-      // If user is not registered, show error
-      setState(() {
-        _status = 'Account not found. Please sign up first.';
+      // Step 6: Complete login and navigate to workspace
+      print('✅ 2FA not enabled - redirecting to workspace');
+      _safeSetState(() {
+        _status = 'Sign in successful! Redirecting...';
         _isLoading = false;
       });
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      String workspaceName = 'YourWorkspace';
+      String channelName = 'general';
+      
+      try {
+        final workspaces = await DistributedService.getUserWorkspaces(address).timeout(
+          const Duration(seconds: 8),
+          onTimeout: () => [],
+        ).catchError((e) {
+          print('⚠️ Error fetching workspace details: $e');
+          return <Map<String, dynamic>>[];
+        });
+        
+        if (workspaces.isNotEmpty) {
+          workspaceName = workspaces.first['name']?.toString() ?? 'YourWorkspace';
+          channelName = workspaces.first['defaultChannel']?.toString() ?? 'general';
+        }
+      } catch (e) {
+        print('⚠️ Error fetching workspace details: $e');
+      }
+      
+      await SessionService.saveLoginSession(address, workspaceName, channelName);
+      
+      if (mounted) {
+        _isProcessing = false;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => TeamHomePage(
+              workspaceName: workspaceName,
+              channelName: channelName,
+            ),
+          ),
+        );
+      } else {
+        _isProcessing = false;
+      }
+      
     } catch (e) {
-      setState(() {
-        _status = 'Error: ${e.toString()}';
+      print('❌ Sign in error: $e');
+      _isProcessing = false;
+      
+      String errorMessage = 'Sign in failed. Please try again.';
+      if (e is TimeoutException) {
+        errorMessage = 'Connection timeout. Please check your network and try again.';
+      } else if (e.toString().contains('Invalid private key') || 
+                 e.toString().contains('Invalid hex')) {
+        errorMessage = 'Invalid private key format. Please check and try again.';
+      } else if (e.toString().contains('Connection')) {
+        errorMessage = 'Network error. Please check your connection.';
+      }
+      
+      _safeSetState(() {
+        _status = errorMessage;
         _isLoading = false;
       });
     }
@@ -198,6 +320,7 @@ class _SignInScreenState extends State<SignInScreen> {
 
   @override
   void dispose() {
+    _isProcessing = false; // Reset processing flag
     _privateKeyController.dispose();
     _privateKeyFocusNode.dispose();
     super.dispose();
@@ -353,14 +476,23 @@ class _SignInScreenState extends State<SignInScreen> {
                                     ),
                                   ),
                                 ),
-                                if (_status.isNotEmpty && _status.contains('Error'))
+                                if (_status.isNotEmpty)
                                   Padding(
                                     padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 0, 16),
                                     child: Text(
                                       _status,
-                                      style: const TextStyle(
-                                        color: Colors.red,
+                                      style: TextStyle(
+                                        color: _status.contains('Error') || 
+                                               _status.contains('failed') ||
+                                               _status.contains('timeout') ||
+                                               _status.contains('not found')
+                                            ? Colors.red
+                                            : _status.contains('successful') || 
+                                              _status.contains('Redirecting')
+                                                ? Colors.green
+                                                : Colors.blue,
                                         fontSize: 12,
+                                        fontWeight: FontWeight.w500,
                                       ),
                                     ),
                                   ),
@@ -370,7 +502,7 @@ class _SignInScreenState extends State<SignInScreen> {
                                     width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
                                     height: 44,
                                     child: FilledButton(
-                                      onPressed: _isLoading ? null : _signIn,
+                                      onPressed: (_isLoading || _isProcessing) ? null : _signIn,
                                       style: FilledButton.styleFrom(
                                         backgroundColor: const Color(0xFF0F365F),
                                         foregroundColor: Colors.white,

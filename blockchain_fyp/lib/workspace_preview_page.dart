@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'workspace_home_page.dart';
-import 'services/orbitdb_service.dart';
-import 'dart:convert';
+import 'services/distributed_service.dart';
+import 'services/session_service.dart';
 
-class ChannelPreviewPage extends StatelessWidget {
+class ChannelPreviewPage extends StatefulWidget {
   final String workspaceName;
   final String channelName;
   final String userAddress;
@@ -12,6 +13,212 @@ class ChannelPreviewPage extends StatelessWidget {
       required this.workspaceName,
       required this.channelName,
       required this.userAddress});
+
+  @override
+  State<ChannelPreviewPage> createState() => _ChannelPreviewPageState();
+}
+
+class _ChannelPreviewPageState extends State<ChannelPreviewPage> {
+  bool _isLoading = false;
+  bool _isProcessing = false; // Prevent multiple simultaneous calls
+
+  /// Safely updates state only if widget is still mounted
+  void _safeSetState(VoidCallback fn) {
+    if (mounted) {
+      setState(fn);
+    }
+  }
+
+  Future<void> _createWorkspaceAndNavigate() async {
+    // Prevent multiple simultaneous calls
+    if (_isProcessing) {
+      print('⚠️ Workspace creation already in progress, ignoring duplicate call');
+      return;
+    }
+
+    _isProcessing = true;
+    _safeSetState(() {
+      _isLoading = true;
+    });
+
+    try {
+      print('🚀 Starting workspace creation: ${widget.workspaceName} for user: ${widget.userAddress}');
+      
+      // Step 1: Create workspace with timeout
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      String? workspaceId;
+      try {
+        workspaceId = await DistributedService.createWorkspace(
+          workspaceName: widget.workspaceName,
+          inviterAddress: widget.userAddress,
+        ).timeout(
+          const Duration(seconds: 15),
+          onTimeout: () {
+            throw TimeoutException('Workspace creation timed out. Please check your network connection.');
+          },
+        );
+      } catch (e) {
+        print('❌ Workspace creation error: $e');
+        _isProcessing = false;
+        
+        if (!mounted) return;
+        
+        String errorMessage = 'Failed to create workspace. Please try again.';
+        if (e.toString().contains('already have a workspace')) {
+          errorMessage = 'You already have a workspace with this name. Please choose a different name.';
+        } else if (e.toString().contains('timeout') || e.toString().contains('Timeout')) {
+          errorMessage = 'Connection timeout. Please check your network and try again.';
+        } else if (e.toString().contains('Connection')) {
+          errorMessage = 'Network error. Please check your connection.';
+        }
+        
+        _safeSetState(() {
+          _isLoading = false;
+        });
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(errorMessage),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 4),
+              action: SnackBarAction(
+                label: 'OK',
+                textColor: Colors.white,
+                onPressed: () {},
+              ),
+            ),
+          );
+        }
+        return;
+      }
+      
+      if (workspaceId == null || !mounted) {
+        _isProcessing = false;
+        _safeSetState(() {
+          _isLoading = false;
+        });
+        return;
+      }
+      
+      print('✅ Workspace created: $workspaceId');
+      
+      // Step 2: Add creator as member (non-blocking - don't fail if this times out)
+      if (mounted) {
+        _safeSetState(() {
+          // Keep loading state
+        });
+        
+        try {
+          // Get creator's display name (with timeout)
+          String? creatorDisplayName;
+          try {
+            final profile = await DistributedService.getUserProfile(widget.userAddress).timeout(
+              const Duration(seconds: 5),
+              onTimeout: () => null,
+            ).catchError((e) {
+              print('⚠️ Error fetching profile for member: $e');
+              return null;
+            });
+            
+            if (profile != null) {
+              creatorDisplayName = profile['username']?.toString();
+            }
+          } catch (e) {
+            print('⚠️ Error getting creator profile: $e');
+          }
+          
+          // Add member (with timeout, but don't fail if this fails)
+          await DistributedService.addWorkspaceMember(
+            workspaceId: workspaceId,
+            memberAddress: widget.userAddress,
+            displayName: creatorDisplayName,
+          ).timeout(
+            const Duration(seconds: 8),
+            onTimeout: () {
+              print('⚠️ Add member timed out, continuing anyway');
+              return false;
+            },
+          ).catchError((e) {
+            print('⚠️ Failed to add creator as member (non-critical): $e');
+            return false;
+          });
+          
+          print('✅ Creator added as workspace member');
+        } catch (e) {
+          print('⚠️ Error adding creator as member (non-critical): $e');
+          // Continue anyway - workspace is created
+        }
+      }
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      // Step 3: Save login session
+      try {
+        await SessionService.saveLoginSession(
+          widget.userAddress,
+          widget.workspaceName,
+          widget.channelName.isNotEmpty ? widget.channelName : 'general',
+        );
+        print('✅ Login session saved');
+      } catch (e) {
+        print('⚠️ Error saving session: $e');
+        // Continue anyway
+      }
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      // Step 4: Navigate to workspace home
+      _isProcessing = false;
+      _safeSetState(() {
+        _isLoading = false;
+      });
+      
+      if (mounted) {
+        // Use pushReplacement to replace current screen
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => TeamHomePage(
+              workspaceName: widget.workspaceName,
+              channelName: widget.channelName.isNotEmpty ? widget.channelName : 'general',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Unexpected error in workspace creation: $e');
+      _isProcessing = false;
+      _safeSetState(() {
+        _isLoading = false;
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('An unexpected error occurred. Please try again.'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -86,7 +293,7 @@ class ChannelPreviewPage extends StatelessWidget {
                                 Align(
                                   alignment: AlignmentDirectional(0, 0),
                                   child: Text(
-                                    " Meet your team's first channel: #${channelName.isNotEmpty ? channelName : 'Work'} ",
+                                    " Meet your team's first channel: #${widget.channelName.isNotEmpty ? widget.channelName : 'Work'} ",
                                     textAlign: TextAlign.center,
                                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
                                           fontFamily: 'Inter',
@@ -154,109 +361,7 @@ class ChannelPreviewPage extends StatelessWidget {
                                     width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
                                     height: 44,
                                     child: FilledButton(
-                                      onPressed: () async {
-                                        // Save workspace for user in OrbitDB
-                                        final key = userAddress.toLowerCase().trim();
-                                        final workspaceDetails = jsonEncode({
-                                          'workspaceName': workspaceName,
-                                          'channelName': channelName,
-                                        });
-                                        print(
-                                            'Saving workspace for key: $key, value: $workspaceDetails');
-                                        final success = await OrbitDBService.saveWorkspaceForUser(key, workspaceDetails);
-                                        print('Workspace save result: $success');
-                                        print('📌 Workspace database address cached for future use');
-                                        
-                                        // Add the creator as the first member (inviter) of the workspace
-                                        try {
-                                          // Get creator's display name from profile
-                                          String? creatorDisplayName;
-                                          final profileDbName = 'profile_$key';
-                                          final profileDbAddress = await OrbitDBService.getExistingDatabaseAddress(profileDbName);
-                                          if (profileDbAddress != null) {
-                                            final profileMessages = await OrbitDBService.getMessages(profileDbAddress);
-                                            for (var msg in profileMessages) {
-                                              if (msg['type'] == 'profile' && msg['userAddress']?.toString().toLowerCase() == key) {
-                                                creatorDisplayName = msg['username']?.toString();
-                                                break;
-                                              }
-                                            }
-                                          }
-                                          
-                                          await OrbitDBService.addWorkspaceMember(
-                                            inviterAddress: key,
-                                            memberAddress: key,
-                                            workspaceName: workspaceName,
-                                            memberDisplayName: creatorDisplayName,
-                                          );
-                                          print('✅ Creator added as workspace member');
-                                        } catch (e) {
-                                          print('⚠️ Failed to add creator as member: $e');
-                                          // Continue anyway since workspace was saved
-                                        }
-                                        
-                                        // Save the initial channel to OrbitDB
-                                        try {
-                                          if (channelName.isNotEmpty && channelName.toLowerCase() != 'work') {
-                                            final workspaceDbName = 'workspace_$key';
-                                            var dbAddress = await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
-                                            
-                                            if (dbAddress == null) {
-                                              dbAddress = await OrbitDBService.createChatDB(workspaceDbName);
-                                            }
-                                            
-                                            if (dbAddress != null) {
-                                              // Check if channel already exists
-                                              final messages = await OrbitDBService.getMessages(dbAddress);
-                                              final channelExists = messages.any((msg) =>
-                                                  msg['type'] == 'channel' &&
-                                                  msg['workspaceName'] == workspaceName &&
-                                                  msg['channelName']?.toString().toLowerCase() == channelName.toLowerCase());
-                                              
-                                              if (!channelExists) {
-                                                // Create channel message
-                                                final channelMessage = {
-                                                  'type': 'channel',
-                                                  'workspaceName': workspaceName,
-                                                  'channelName': channelName,
-                                                  'createdBy': key,
-                                                  'inviterAddress': key,
-                                                  'timestamp': DateTime.now().millisecondsSinceEpoch,
-                                                };
-                                                
-                                                // Save channel to workspace database
-                                                final result = await OrbitDBService.addMessage(dbAddress, channelMessage);
-                                                if (result != null) {
-                                                  print('✅ Initial channel "$channelName" saved to OrbitDB');
-                                                  
-                                                  // Create channel database for messages
-                                                  final channelDbName = 'channel_${key}_${workspaceName}_$channelName';
-                                                  final channelDbAddress = await OrbitDBService.createChatDB(channelDbName);
-                                                  if (channelDbAddress != null) {
-                                                    print('✅ Channel database created: $channelDbName');
-                                                  }
-                                                }
-                                              } else {
-                                                print('ℹ️ Initial channel "$channelName" already exists in database');
-                                              }
-                                            }
-                                          }
-                                        } catch (e) {
-                                          print('⚠️ Failed to save initial channel: $e');
-                                          // Continue anyway - it will be saved when TeamHomePage loads
-                                        }
-                                        
-                                        // No need to save to SharedPreferences - all data is now in OrbitDB
-                                        Navigator.push(
-                                          context,
-                                          MaterialPageRoute(
-                                            builder: (_) => TeamHomePage(
-                                              workspaceName: workspaceName,
-                                              channelName: channelName,
-                                            ),
-                                          ),
-                                        );
-                                      },
+                                      onPressed: (_isLoading || _isProcessing) ? null : _createWorkspaceAndNavigate,
                                       style: FilledButton.styleFrom(
                                         backgroundColor: const Color(0xFF0F365F),
                                         foregroundColor: Colors.white,
@@ -266,17 +371,26 @@ class ChannelPreviewPage extends StatelessWidget {
                                           borderRadius: BorderRadius.circular(12),
                                         ),
                                       ),
-                                      child: Text(
-                                        'See your channel in EtherShare',
-                                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                                              fontFamily: 'Inter',
-                                              color: Colors.white,
-                                              letterSpacing: 0.0,
-                                            ) ?? const TextStyle(
-                                              fontSize: 16,
-                                              color: Colors.white,
+                                      child: _isLoading
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: Colors.white,
+                                              ),
+                                            )
+                                          : Text(
+                                              'See your channel in EtherShare',
+                                              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                                    fontFamily: 'Inter',
+                                                    color: Colors.white,
+                                                    letterSpacing: 0.0,
+                                                  ) ?? const TextStyle(
+                                                    fontSize: 16,
+                                                    color: Colors.white,
+                                                  ),
                                             ),
-                                      ),
                                     ),
                                   ),
                                 ),
