@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:provider/provider.dart';
 import '../services/contract_service.dart';
+import '../services/distributed_service.dart';
 import '../ProfileSetup.dart';
 import 'package:web3dart/web3dart.dart';
 import '../screens/sign_in_screen.dart';
@@ -18,29 +20,55 @@ class _SignUpScreenState extends State<SignUpScreen> {
   final FocusNode _privateKeyFocusNode = FocusNode();
   String _status = '';
   bool _isLoading = false;
+  bool _isProcessing = false; // Prevent multiple simultaneous sign-up attempts
 
   bool _isDesktop(BuildContext context) {
     return MediaQuery.of(context).size.width > 768;
   }
 
+  /// Safely updates state only if widget is still mounted
+  void _safeSetState(VoidCallback fn) {
+    if (mounted) {
+      setState(fn);
+    }
+  }
+
   Future<void> _signUp() async {
+    // Prevent multiple simultaneous calls
+    if (_isProcessing) {
+      print('⚠️ Sign-up already in progress, ignoring duplicate call');
+      return;
+    }
+
     final privateKey = _privateKeyController.text.trim();
     
     if (privateKey.isEmpty) {
-      setState(() {
+      _safeSetState(() {
         _status = 'Please enter your private key';
       });
       return;
     }
 
-    setState(() {
+    // Validate private key format
+    if (privateKey.length < 64) {
+      _safeSetState(() {
+        _status = 'Invalid private key format';
+        _isLoading = false;
+      });
+      return;
+    }
+
+    // Set processing flag and loading state
+    _isProcessing = true;
+    _safeSetState(() {
       _isLoading = true;
       _status = 'Signing up...';
     });
 
     final contractService = Provider.of<ContractService?>(context, listen: false);
     if (contractService == null) {
-      setState(() {
+      _isProcessing = false;
+      _safeSetState(() {
         _status = 'Contract service not initialized';
         _isLoading = false;
       });
@@ -48,33 +76,136 @@ class _SignUpScreenState extends State<SignUpScreen> {
     }
 
     try {
+      // Validate and extract address from private key
       final credentials = EthPrivateKey.fromHex(
         privateKey.startsWith('0x') ? privateKey.substring(2) : privateKey,
       );
       final address = credentials.address.hex;
       
-      // Check if user is already registered
-      final isRegistered = await contractService.isRegistered(address);
+      print('🔐 Starting sign-up process for address: $address');
+      
+      // Step 1: Check if user is already registered
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      _safeSetState(() {
+        _status = 'Checking if account exists...';
+      });
+      
+      final isRegistered = await contractService.isRegistered(address).timeout(
+        const Duration(seconds: 12),
+        onTimeout: () {
+          throw TimeoutException('Connection timeout. Please check your network connection.');
+        },
+      );
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
       
       if (isRegistered) {
-        setState(() {
-          _status = 'Account already exists. Please sign in instead.';
+        _isProcessing = false;
+        _safeSetState(() {
+          _status = 'This private key is already registered. Please sign in instead.';
           _isLoading = false;
         });
         return;
       }
       
-      // Register the user
-      await contractService.register(_privateKeyController.text);
+      // Step 2: Check if address already has a profile in MongoDB
+      _safeSetState(() {
+        _status = 'Verifying account...';
+      });
+      
+      try {
+        final existingProfile = await DistributedService.getUserProfile(address).timeout(
+          const Duration(seconds: 8),
+          onTimeout: () => null,
+        ).catchError((e) {
+          print('⚠️ Could not check existing profile: $e');
+          return null;
+        });
+        
+        if (!mounted) {
+          _isProcessing = false;
+          return;
+        }
+        
+        if (existingProfile != null) {
+          _isProcessing = false;
+          _safeSetState(() {
+            _status = 'This private key is already registered. Please sign in instead.';
+            _isLoading = false;
+          });
+          return;
+        }
+      } catch (e) {
+        // If check fails, continue with registration (backend will catch duplicates)
+        print('⚠️ Could not check existing profile: $e');
+      }
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      // Step 3: Register the user on blockchain
+      _safeSetState(() {
+        _status = 'Registering on blockchain...';
+      });
+      
+      await contractService.register(_privateKeyController.text).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          throw TimeoutException('Registration timeout. Please try again.');
+        },
+      );
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      // Step 4: Wait for transaction confirmation
+      _safeSetState(() {
+        _status = 'Confirming registration...';
+      });
+      
       await Future.delayed(const Duration(seconds: 2));
       
-      // Login the user
-      await contractService.login(_privateKeyController.text);
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
       
-      setState(() {
+      // Step 5: Login the user
+      _safeSetState(() {
+        _status = 'Completing setup...';
+      });
+      
+      await contractService.login(_privateKeyController.text).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          throw TimeoutException('Login timeout. Please try again.');
+        },
+      );
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      _isProcessing = false;
+      _safeSetState(() {
         _status = 'Sign up successful!';
         _isLoading = false;
       });
+      
+      // Small delay to show success message
+      await Future.delayed(const Duration(milliseconds: 500));
       
       if (mounted) {
         Navigator.pushReplacement(
@@ -82,14 +213,30 @@ class _SignUpScreenState extends State<SignUpScreen> {
           MaterialPageRoute(
             builder: (_) => ProfileSetupScreen(
               address: address,
-              show2FASetup: true, // Enable 2FA setup flow after profile completion
+              show2FASetup: true,
             ),
           ),
         );
       }
     } catch (e) {
-      setState(() {
-        _status = 'Error: ${e.toString()}';
+      print('❌ Sign up error: $e');
+      _isProcessing = false;
+      
+      String errorMessage = 'Sign up failed. Please try again.';
+      if (e is TimeoutException) {
+        errorMessage = 'Connection timeout. Please check your network and try again.';
+      } else if (e.toString().contains('Invalid private key') || 
+                 e.toString().contains('Invalid hex')) {
+        errorMessage = 'Invalid private key format. Please check and try again.';
+      } else if (e.toString().contains('already registered') ||
+                 e.toString().contains('duplicate')) {
+        errorMessage = 'This account is already registered. Please sign in instead.';
+      } else if (e.toString().contains('Connection')) {
+        errorMessage = 'Network error. Please check your connection.';
+      }
+      
+      _safeSetState(() {
+        _status = errorMessage;
         _isLoading = false;
       });
     }
@@ -97,6 +244,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
 
   @override
   void dispose() {
+    _isProcessing = false; // Reset processing flag
     _privateKeyController.dispose();
     _privateKeyFocusNode.dispose();
     super.dispose();
@@ -266,14 +414,22 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                     ),
                                   ),
                                 ),
-                                if (_status.isNotEmpty && _status.contains('Error'))
+                                if (_status.isNotEmpty)
                                   Padding(
                                     padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 0, 16),
                                     child: Text(
                                       _status,
-                                      style: const TextStyle(
-                                        color: Colors.red,
+                                      style: TextStyle(
+                                        color: _status.contains('Error') || 
+                                               _status.contains('failed') ||
+                                               _status.contains('timeout') ||
+                                               _status.contains('already registered')
+                                            ? Colors.red
+                                            : _status.contains('successful')
+                                                ? Colors.green
+                                                : Colors.blue,
                                         fontSize: 12,
+                                        fontWeight: FontWeight.w500,
                                       ),
                                     ),
                                   ),
@@ -283,7 +439,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                     width: MediaQuery.of(context).size.width > 400 ? 370 : double.infinity,
                                     height: 44,
                                     child: FilledButton(
-                                      onPressed: _isLoading ? null : _signUp,
+                                      onPressed: (_isLoading || _isProcessing) ? null : _signUp,
                                       style: FilledButton.styleFrom(
                                         backgroundColor: const Color(0xFF0F365F),
                                         foregroundColor: Colors.white,
@@ -414,4 +570,5 @@ class _SignUpScreenState extends State<SignUpScreen> {
     );
   }
 }
+
 

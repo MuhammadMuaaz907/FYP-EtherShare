@@ -1,19 +1,19 @@
 import 'dart:async';
 
-import 'package:blockchain_fyp/splash.dart';
+import 'Splash.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
-import 'package:get_it/get_it.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:get_it/get_it.dart';
+import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:app_links/app_links.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'services/contract_service.dart';
-import 'services/invite_link_manager.dart';
 import 'services/invite_service.dart';
-import 'services/ipfs_service.dart';
-import 'services/orbitdb_service.dart';
+import 'services/distributed_service.dart';
+import 'services/session_service.dart';
+import 'services/invite_link_manager.dart';
 import 'screens/accept_invite_screen.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -36,9 +36,7 @@ Future<void> main() async {
       print('SMTP configuration will be required when sending emails.');
     }
     
-    GetIt.I.registerSingleton<IPFSService>(IPFSService());
-    GetIt.I.registerSingleton<OrbitDBService>(OrbitDBService());
-    print('✅ Services registered');
+    print('✅ Services initialized');
     
     GetIt.I.registerSingletonAsync<Web3App>(() async {
       final app = await Web3App.createInstance(
@@ -54,9 +52,6 @@ Future<void> main() async {
     });
     print('✅ Web3App registered');
 
-    // Initialize OrbitDB in background after app starts
-    _initializeOrbitDBInBackground();
-
     print('🎬 Running MyApp...');
     runApp(const MyApp());
   } catch (e) {
@@ -69,16 +64,6 @@ Future<void> main() async {
         ),
       ),
     ));
-  }
-}
-
-// Initialize OrbitDB in background to avoid blocking app startup
-void _initializeOrbitDBInBackground() async {
-  try {
-    await OrbitDBService.initOrbitDB();
-    print('✅ OrbitDB initialized successfully');
-  } catch (e) {
-    print('❌ Failed to initialize OrbitDB: $e');
   }
 }
 
@@ -97,11 +82,65 @@ class _MyAppState extends State<MyApp> {
   @override
   void initState() {
     super.initState();
-    _setupMethodChannel();
-    _initDeepLinks();
+    _initializeServices();
+    _handleDeepLink();
   }
 
-  Future<void> _initDeepLinks() async {
+  /// Initialize Distributed System and other services
+  /// Non-blocking: Runs in background, doesn't delay app startup
+  Future<void> _initializeServices() async {
+    // Don't await - let app start even if backend is unavailable
+    // This prevents blocking the UI during startup
+    Future.microtask(() async {
+      try {
+        print('🚀 Initializing Distributed System...');
+        
+        // Try to connect with timeout - don't block if it fails
+        final connected = await DistributedService.connect().timeout(
+          const Duration(seconds: 4),
+          onTimeout: () {
+            print('⚠️ Backend connection timeout - continuing without backend');
+            return false;
+          },
+        ).catchError((e) {
+          print('⚠️ Backend connection error - continuing without backend');
+          return false;
+        });
+        
+        if (connected) {
+          print('✅ Distributed System initialized successfully');
+          
+          // Build chain if nodes exist (non-blocking)
+          try {
+            final chain = await DistributedService.buildChain().timeout(
+              const Duration(seconds: 5),
+              onTimeout: () {
+                print('⚠️ Chain build timeout - skipping');
+                return null;
+              },
+            );
+            if (chain != null) {
+              print('✅ Chain structure ready');
+            }
+          } catch (e) {
+            print('⚠️ Chain build error (non-critical): $e');
+          }
+        } else {
+          print('⚠️ Backend unavailable - app will work in offline mode');
+          print('💡 To enable backend features:');
+          print('   1. Start backend: cd backend && npm run dev');
+          print('   2. Ensure PC and phone are on same WiFi');
+          print('   3. Verify PC IP: 192.168.0.34');
+        }
+      } catch (e) {
+        // Don't crash app if initialization fails
+        print('⚠️ Distributed System initialization error (non-critical): $e');
+      }
+    });
+  }
+
+  /// Handle deep links for workspace invites
+  Future<void> _handleDeepLink() async {
     await InviteLinkManager.instance.loadFromStorage();
 
     _appLinks = AppLinks();
@@ -162,13 +201,14 @@ class _MyAppState extends State<MyApp> {
       return;
     }
 
-    final session = await OrbitDBService.getLoginSession();
-    if (session['isLoggedIn'] != 'true') {
-      return;
-    }
+    // Check if user is logged in using SessionService
+    final session = await SessionService.getLoginSession();
+    final isLoggedIn = session['isLoggedIn'] == 'true';
+    final userAddress = session['userAddress'] ?? '';
 
-    final userAddress = session['userAddress'];
-    if (userAddress == null || userAddress.isEmpty) {
+    if (!isLoggedIn || userAddress.isEmpty) {
+      print('ℹ️ User not logged in, cannot accept invite yet.');
+      // Optionally, you could store the invite and prompt login
       return;
     }
 
@@ -207,23 +247,6 @@ class _MyAppState extends State<MyApp> {
         fullscreenDialog: true,
       ),
     );
-  }
-
-  void _setupMethodChannel() {
-    // Initialize MethodChannel for OrbitDB Bridge
-    const MethodChannel channel = MethodChannel('orbitdb_channel');
-
-    // Set up method call handler for real-time updates
-    channel.setMethodCallHandler((call) async {
-      switch (call.method) {
-        case 'onMessageUpdate':
-          // Handle real-time message updates
-          print('📨 Real-time message update received: ${call.arguments}');
-          break;
-        default:
-          print('❌ Unknown method call: ${call.method}');
-      }
-    });
   }
 
   @override
@@ -283,6 +306,3 @@ class _MyAppState extends State<MyApp> {
     super.dispose();
   }
 }
-
-// LoginScreen and HomeScreen are now in separate files (login_screen.dart and home_screen.dart)
-// This keeps the code organized and maintainable

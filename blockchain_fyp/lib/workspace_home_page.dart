@@ -1,8 +1,10 @@
+
 import 'package:flutter/material.dart';
 import 'channel_page.dart';
 import 'login_screen.dart';
 import 'package:flutter/services.dart';
-import 'services/orbitdb_service.dart';
+import 'services/session_service.dart';
+import 'services/distributed_service.dart';
 import 'pages/dms_page.dart';
 import 'pages/activity_page.dart';
 import 'invite_teammates_page.dart';
@@ -185,260 +187,89 @@ class _TeamHomePageState extends State<TeamHomePage> {
       if (userAddress == null) {
         await _loadUserAddress();
       }
-      if (_inviterAddress == null) {
-        _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-            widget.workspaceName);
-      }
 
-      // Load channels from workspace database
-      final workspaceDbName =
-          'workspace_${_inviterAddress ?? userAddress}';
-      final dbAddress =
-          await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
-
-      // Use a Set to track unique channels by their display name (case-insensitive)
-      final channelSet = <String>{'General', 'Random'};
-      // Map to track original channel names -> display names (for database lookup)
-      final Map<String, String> originalToDisplay = {};
+      print('📋 Loading channels for workspace: ${widget.workspaceName}');
       
-      // Clear and rebuild display-to-original mapping
-      _displayToOriginalName.clear();
+      // Ensure user address is loaded
+      if (userAddress == null) {
+        await _loadUserAddress();
+      }
       
-      // Add default channels to mapping (they are their own original names)
-      _displayToOriginalName['general'] = 'general';
-      _displayToOriginalName['random'] = 'random';
+      // Use the new getWorkspaceChannels method to load channels from database
+      // Pass memberAddress so user only sees channels they have access to
+      final channels = await DistributedService.getWorkspaceChannels(
+        workspaceId: widget.workspaceName,
+        memberAddress: userAddress, // Filter channels accessible to this member
+      );
 
-      if (dbAddress != null) {
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        
-        // Step 1: Collect deleted channels (to filter them out)
-        final Set<String> deletedChannels = {}; // Set of deleted channel original names (lowercase)
-        
-        for (var message in messages) {
-          if (message['type'] == 'channel_delete' &&
-              message['workspaceName'] == widget.workspaceName) {
-            final deletedChannelName = message['channelName']?.toString();
-            if (deletedChannelName != null && deletedChannelName.isNotEmpty) {
-              deletedChannels.add(deletedChannelName.toLowerCase());
-              print('🗑️ [LoadChannels] Found deleted channel: "$deletedChannelName"');
-            }
-          }
-        }
-        
-        // Step 2: Build simple rename map (original name -> latest new name)
-        // Simple approach: Find the most recent rename for each original channel name
-        final Map<String, Map<String, dynamic>> renameMap = {}; // originalName (lowercase) -> {newName, timestamp}
-        
-        // Collect all rename actions and keep only the latest one for each original name
-        for (var message in messages) {
-          if (message['type'] == 'channel_rename' &&
-              message['workspaceName'] == widget.workspaceName) {
-            final oldName = message['oldChannelName']?.toString();
-            final newName = message['newChannelName']?.toString();
-            final timestamp = message['timestamp'];
-            
-            if (oldName != null && 
-                newName != null && 
-                oldName.isNotEmpty && 
-                newName.isNotEmpty && 
-                timestamp is int) {
-              final oldNameLower = oldName.toLowerCase();
-              
-              // Only keep the most recent rename for each original name
-              if (!renameMap.containsKey(oldNameLower) ||
-                  (renameMap[oldNameLower]!['timestamp'] as int) < timestamp) {
-                renameMap[oldNameLower] = {
-                  'newName': newName,
-                  'timestamp': timestamp,
-                };
-                print('📝 [LoadChannels] Found rename: "$oldName" -> "$newName" (timestamp: $timestamp)');
-              }
-            }
-          }
-        }
-        
-        // Convert to simple map for easier access
-        final Map<String, String> channelRenames = {};
-        renameMap.forEach((key, value) {
-          channelRenames[key] = value['newName'] as String;
-        });
-        
-        // Step 2: Process channel messages
-        // Get the latest channel message for each channel (in case channel was updated)
-        final Map<String, Map<String, dynamic>> latestChannels = {};
-        
-        for (var message in messages) {
-          if (message['type'] == 'channel' &&
-              message['workspaceName'] == widget.workspaceName) {
-            final channelName = message['channelName']?.toString();
-            final originalName = message['originalChannelName']?.toString() ?? channelName;
-            
-            if (channelName != null && channelName.isNotEmpty) {
-              final key = (originalName ?? channelName).toLowerCase();
-              
-              // Keep only the latest channel message (by timestamp)
-              if (!latestChannels.containsKey(key) ||
-                  (message['timestamp'] as int? ?? 0) > 
-                  (latestChannels[key]!['timestamp'] as int? ?? 0)) {
-                latestChannels[key] = message;
-              }
-            }
-          }
-        }
-        
-        // Step 3: Process channels and apply renames (skip deleted channels)
-        for (var entry in latestChannels.entries) {
-          final message = entry.value;
-          final channelName = message['channelName']?.toString();
-          final originalName = message['originalChannelName']?.toString() ?? channelName;
-          
-          if (channelName != null && channelName.isNotEmpty) {
-            final originalNameLower = (originalName ?? channelName).toLowerCase();
-            
-            // Skip if channel is deleted
-            if (deletedChannels.contains(originalNameLower)) {
-              print('⏭️ [LoadChannels] Skipping deleted channel: "$originalNameLower"');
-              continue;
-            }
-            
-            // Determine display name: use renamed name if exists, otherwise use channel name from message
-            String displayName = channelName; // Use name from latest channel message
-            
-            // If there's a rename mapping, use that (takes precedence)
-            if (channelRenames.containsKey(originalNameLower)) {
-              displayName = channelRenames[originalNameLower]!;
-              print('🔄 [LoadChannels] Channel "$originalNameLower" renamed to "$displayName"');
-            }
-            
-            // Store mapping: original name -> display name (for database lookup)
-            originalToDisplay[originalNameLower] = displayName;
-            
-            // Also store reverse mapping: display name -> original name (for navigation)
-            final displayNameLower = displayName.toLowerCase();
-            _displayToOriginalName[displayNameLower] = originalNameLower;
-            print('📝 [LoadChannels] Stored mapping: display="$displayName" -> original="$originalNameLower"');
-            
-            // Add to set (automatically handles duplicates by case-insensitive comparison)
-            if (!channelSet.any((c) => c.toLowerCase() == displayNameLower)) {
-                // Remove old name if it exists (in case of rename)
-                channelSet.removeWhere((c) => c.toLowerCase() == originalNameLower && 
-                                             c.toLowerCase() != displayNameLower);
-                channelSet.add(displayName);
-                print('✅ [LoadChannels] Added channel: "$displayName" (original: "$originalNameLower")');
-              } else {
-                print('⏭️ [LoadChannels] Skipped duplicate: "$displayName"');
-              }
-          }
-        }
+      // Ensure General and Random are always present (built-in channels)
+      final Set<String> channelSet = channels.toSet();
+      if (!channelSet.contains('General')) {
+        channels.insert(0, 'General');
+      }
+      if (!channelSet.contains('Random')) {
+        // Insert Random after General
+        final generalIndex = channels.indexOf('General');
+        channels.insert(generalIndex + 1, 'Random');
       }
 
-      // Convert set to sorted list (General and Random first, then alphabetical)
-      final channels = <String>[];
-      if (channelSet.contains('General')) {
-        channels.add('General');
-        channelSet.remove('General');
-      }
-      if (channelSet.contains('Random')) {
-        channels.add('Random');
-        channelSet.remove('Random');
-      }
-      channels.addAll(channelSet.toList()..sort());
-
-      // Also check if widget.channelName exists (from workspace creation)
-      // and add it if it's not already in the list
-      if (widget.channelName.isNotEmpty &&
-          widget.channelName.toLowerCase() != 'work' &&
-          !channels.any((c) => c.toLowerCase() == widget.channelName.toLowerCase())) {
-        channels.add(widget.channelName);
-        final initialChannelLower = widget.channelName.toLowerCase();
-        // Add to mapping (initial channel is its own original name)
-        _displayToOriginalName[initialChannelLower] = initialChannelLower;
-        print('✅ Added initial channel from workspace creation: ${widget.channelName}');
-        print('📝 [LoadChannels] Stored mapping for initial channel: display="$initialChannelLower" -> original="$initialChannelLower"');
-        
-        // Save the initial channel to OrbitDB if it's not already saved
-        await _saveInitialChannel(widget.channelName);
-      }
-
-      print('📊 [LoadChannels] Final channels list: ${channels.length} channels');
-      for (var channel in channels) {
-        print('   - $channel');
-      }
-
-      setState(() {
-        _channels = channels;
-        _lastChannelLoadTime = DateTime.now(); // Update last load time
+      // Ensure proper sorting: General first, Random second, then user-created channels
+      channels.sort((a, b) {
+        final aLower = a.toLowerCase();
+        final bLower = b.toLowerCase();
+        if (aLower == 'general') return -1;
+        if (bLower == 'general') return 1;
+        if (aLower == 'random') return -1;
+        if (bLower == 'random') return 1;
+        return a.compareTo(b);
       });
+
+      // Ensure initial channel is present if specified (user-created channels)
+      if (widget.channelName.isNotEmpty && 
+          widget.channelName.toLowerCase() != 'general' && 
+          widget.channelName.toLowerCase() != 'random') {
+        final normalizedName = widget.channelName.toLowerCase();
+        final displayName = widget.channelName;
+        if (!channels.any((c) => c.toLowerCase() == normalizedName)) {
+          channels.add(displayName);
+          // Sort again after adding (maintain General and Random first)
+          channels.sort((a, b) {
+            final aLower = a.toLowerCase();
+            final bLower = b.toLowerCase();
+            if (aLower == 'general') return -1;
+            if (bLower == 'general') return 1;
+            if (aLower == 'random') return -1;
+            if (bLower == 'random') return 1;
+            return a.compareTo(b);
+          });
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _channels = channels;
+          _lastChannelLoadTime = DateTime.now();
+        });
+        print('📊 Loaded ${channels.length} channels: ${channels.join(", ")}');
+      }
+
     } catch (e) {
       print('❌ Error loading channels: $e');
+      // On error, at least show default channels
+      if (mounted) {
+        setState(() {
+          _channels = ['General', 'Random'];
+        });
+      }
     }
   }
 
   Future<void> _saveInitialChannel(String channelName) async {
     try {
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      if (_inviterAddress == null) {
-        _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-            widget.workspaceName);
-      }
-
-      if (userAddress == null || _inviterAddress == null) {
-        print('⚠️ Cannot save initial channel: missing addresses');
-        return;
-      }
-
-      // Get or create workspace database
-      final workspaceDbName = 'workspace_$_inviterAddress';
-      var dbAddress =
-          await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
-
-      if (dbAddress == null) {
-        dbAddress = await OrbitDBService.createChatDB(workspaceDbName);
-        if (dbAddress == null) {
-          print('⚠️ Failed to create workspace database for initial channel');
-          return;
-        }
-      }
-
-      // Check if channel already exists in database
-      final messages = await OrbitDBService.getMessages(dbAddress);
-      final channelExists = messages.any((msg) =>
-          msg['type'] == 'channel' &&
-          msg['workspaceName'] == widget.workspaceName &&
-          msg['channelName']?.toString().toLowerCase() == channelName.toLowerCase());
-
-      if (!channelExists) {
-        // Create channel message
-        final channelMessage = {
-          'type': 'channel',
-          'workspaceName': widget.workspaceName,
-          'channelName': channelName,
-          'createdBy': userAddress!.toLowerCase().trim(),
-          'inviterAddress': _inviterAddress,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        };
-
-        // Save channel to workspace database
-        final result = await OrbitDBService.addMessage(dbAddress, channelMessage);
-        if (result != null) {
-          print('✅ Initial channel "$channelName" saved to OrbitDB');
-
-          // Create channel database for messages
-          final channelDbName =
-              'channel_${_inviterAddress}_${widget.workspaceName}_$channelName';
-          final channelDbAddress =
-              await OrbitDBService.createChatDB(channelDbName);
-          if (channelDbAddress != null) {
-            print('✅ Channel database created: $channelDbName');
-          }
-        } else {
-          print('⚠️ Failed to save initial channel to OrbitDB');
-        }
-      } else {
-        print('ℹ️ Initial channel "$channelName" already exists in database');
-      }
+      // TODO: Implement channel creation in MongoDB
+      // For now, just log that we would create it
+      print('ℹ️ TODO: Save initial channel "$channelName" to MongoDB');
+      print('📝 Would create channel in workspace: ${widget.workspaceName}');
     } catch (e) {
       print('❌ Error saving initial channel: $e');
     }
@@ -446,7 +277,7 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
   Future<void> _loadUserAddress() async {
     try {
-      final session = await OrbitDBService.getLoginSession();
+      final session = await SessionService.getLoginSession();
       userAddress = session['userAddress'];
       print('👤 User address from session: $userAddress');
     } catch (e) {
@@ -481,31 +312,19 @@ class _TeamHomePageState extends State<TeamHomePage> {
       }
       if (userAddress == null) return null;
 
-      final key = userAddress!.toLowerCase().trim();
-      final dbName = 'profile_$key';
+      print('🔍 Loading username from MongoDB for: $userAddress');
+      final profile = await DistributedService.getUserProfile(userAddress!);
 
-      print('🔍 Looking for username in database: $dbName');
-      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-
-      if (dbAddress != null) {
-        print('📌 Found profile database: $dbAddress');
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        print('📨 Retrieved ${messages.length} messages from profile database');
-
-        for (var message in messages) {
-          print(
-              '🔍 Checking message: ${message['type']} for user: ${message['userAddress']}');
-          if (message['type'] == 'profile' && message['userAddress'] == key) {
-            print('📋 Found profile data - Username: ${message['username']}');
-            return message['username'];
-          }
-        }
+      if (profile != null) {
+        final username = profile['username']?.toString();
+        print('📋 Found username: $username');
+        return username;
       } else {
-        print('❌ Profile database not found');
+        print('❌ Profile not found in MongoDB');
       }
       return null;
     } catch (e) {
-      print('❌ Error loading username from OrbitDB: $e');
+      print('❌ Error loading username from MongoDB: $e');
       return null;
     }
   }
@@ -521,25 +340,29 @@ class _TeamHomePageState extends State<TeamHomePage> {
         await _loadUserAddress();
       }
 
-      // First, find the inviter address for this workspace
-      _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-          widget.workspaceName);
-
-      if (_inviterAddress == null) {
-        print(
-            '❌ Could not find inviter for workspace: ${widget.workspaceName}');
+      print('👥 Loading members for workspace: ${widget.workspaceName}');
+      
+      // Get workspace from MongoDB
+      final workspaces = await DistributedService.getUserWorkspaces(userAddress!);
+      final workspace = workspaces.firstWhere(
+        (w) => w['name'] == widget.workspaceName,
+        orElse: () => {},
+      );
+      
+      if (workspace.isEmpty) {
+        print('❌ Workspace not found: ${widget.workspaceName}');
         setState(() {
           _isLoadingMembers = false;
           _memberCount = 0;
         });
         return;
       }
-
-      print('👥 Loading members for workspace: ${widget.workspaceName}');
-      final members = await OrbitDBService.getWorkspaceMembers(
-        inviterAddress: _inviterAddress!,
-        workspaceName: widget.workspaceName,
-      );
+      
+      final workspaceId = workspace['workspace_id'];
+      _inviterAddress = workspace['inviter_address'];
+      
+      // Get members from MongoDB
+      final members = await DistributedService.getWorkspaceMembers(workspaceId);
 
       // Ensure current logged-in user is in the members list
       if (userAddress != null) {
@@ -625,78 +448,22 @@ class _TeamHomePageState extends State<TeamHomePage> {
     }
   }
 
-  /// Get profile name (username) for a given address
+  /// Get profile name (username) for a given address from MongoDB
   Future<String?> _getProfileNameForAddress(String address) async {
     try {
-      final key = address.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      print('🔍 Fetching profile name for: $address (db: $dbName)');
+      print('🔍 Fetching profile name for: $address from MongoDB');
 
-      // Try to get existing database first
-      var dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+      final profile = await DistributedService.getUserProfile(address);
 
-      // If database doesn't exist, try creating it (it might be a new profile)
-      if (dbAddress == null) {
-        print(
-            '⚠️ Profile database not found in cache, trying to create: $dbName');
-        dbAddress = await OrbitDBService.createChatDB(dbName);
-        if (dbAddress == null) {
-          print('❌ Could not create/find profile database for: $address');
-          return null;
+      if (profile != null) {
+        final username = profile['username']?.toString();
+        if (username != null && username.isNotEmpty) {
+          print('✅ Found username: $username for address: $address');
+          return username;
         }
       }
 
-      print('📌 Using profile database: $dbAddress');
-      final messages = await OrbitDBService.getMessages(dbAddress);
-      print('📨 Retrieved ${messages.length} messages from profile database');
-
-      if (messages.isEmpty) {
-        print('⚠️ Profile database is empty for: $address');
-        return null;
-      }
-
-      // Look for profile message
-      for (var message in messages) {
-        final msgType = message['type']?.toString();
-        print('🔍 Checking message: type=$msgType');
-        print('🔍 Message keys: ${message.keys.toList()}');
-        print('🔍 Full message: ${message.toString()}');
-
-        if (msgType == 'profile') {
-          final msgUserAddress =
-              message['userAddress']?.toString().toLowerCase().trim();
-          print(
-              '🔍 Profile message userAddress: $msgUserAddress (looking for: $key)');
-
-          if (msgUserAddress == key) {
-            // Try multiple ways to get username
-            dynamic usernameValue = message['username'];
-            String? username;
-
-            if (usernameValue != null) {
-              username = usernameValue.toString().trim();
-            }
-
-            print(
-                '✅ Found profile - Username value: $usernameValue, Username string: "$username" for address: $address');
-
-            if (username != null && username.isNotEmpty) {
-              print('✅ Returning username: $username');
-              return username;
-            } else {
-              print('⚠️ Username is null or empty in profile for: $address');
-              print('⚠️ Username value type: ${usernameValue.runtimeType}');
-            }
-          } else {
-            print(
-                '⚠️ userAddress mismatch: expected=$key, got=$msgUserAddress');
-          }
-        } else {
-          print('⚠️ Message type is not profile: $msgType');
-        }
-      }
-
-      print('⚠️ No valid profile message found for address: $address');
+      print('⚠️ No profile found for address: $address');
       return null;
     } catch (e, stackTrace) {
       print('❌ Error getting profile name for $address: $e');
@@ -1563,12 +1330,24 @@ class _TeamHomePageState extends State<TeamHomePage> {
                             return;
                           }
 
-                          // Check if channel already exists
-                          if (_channels
-                              .any((c) => c.toLowerCase() == channelName)) {
+                          // Check if channel already exists (case-insensitive)
+                          final normalizedInput = channelName.toLowerCase().trim();
+                          final reservedNames = ['general', 'random'];
+                          
+                          if (reservedNames.contains(normalizedInput)) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
-                                content: Text('Channel already exists'),
+                                content: Text('General and Random are reserved channel names'),
+                                backgroundColor: Colors.orange,
+                              ),
+                            );
+                            return;
+                          }
+                          
+                          if (_channels.any((c) => c.toLowerCase().trim() == normalizedInput)) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Channel "$channelName" already exists'),
                                 backgroundColor: Colors.orange,
                               ),
                             );
@@ -1653,58 +1432,44 @@ class _TeamHomePageState extends State<TeamHomePage> {
       if (userAddress == null) {
         await _loadUserAddress();
       }
-      if (_inviterAddress == null) {
-        _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-            widget.workspaceName);
+      if (userAddress == null) throw Exception('User not found');
+
+      // Normalize channel name (lowercase for database, but keep original for display)
+      final normalizedChannelName = channelName.toLowerCase().trim();
+      
+      // Check for duplicates before creating (case-insensitive)
+      final existingChannels = await DistributedService.getWorkspaceChannels(
+        workspaceId: widget.workspaceName,
+      );
+      
+      if (existingChannels.any((c) => c.toLowerCase().trim() == normalizedChannelName)) {
+        throw Exception('Channel "$channelName" already exists in this workspace');
+      }
+      
+      // Save channel metadata to database
+      final channelCreated = await DistributedService.createChannel(
+        workspaceId: widget.workspaceName,
+        channelId: normalizedChannelName,
+        creatorAddress: userAddress!,
+        channelName: channelName, // Keep original case for display
+      );
+
+      if (!channelCreated) {
+        throw Exception('Failed to save channel to database. Channel may already exist.');
       }
 
-      if (userAddress == null || _inviterAddress == null) {
-        throw Exception('User address or inviter address not found');
-      }
+      // Also add a notification message to general channel (for backward compatibility)
+      await DistributedService.addMessage(
+         workspaceId: widget.workspaceName,
+         channelId: 'general',
+         senderAddress: userAddress!,
+         messageText: 'Channel #$channelName created by user',
+      );
 
-      // Get or create workspace database
-      final workspaceDbName = 'workspace_$_inviterAddress';
-      var dbAddress =
-          await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
+      // Reload channels from database to ensure consistency
+      await _loadChannels();
 
-      if (dbAddress == null) {
-        dbAddress = await OrbitDBService.createChatDB(workspaceDbName);
-        if (dbAddress == null) {
-          throw Exception('Failed to create workspace database');
-        }
-      }
-
-      // Create channel message
-      final channelMessage = {
-        'type': 'channel',
-        'workspaceName': widget.workspaceName,
-        'channelName': channelName,
-        'createdBy': userAddress!.toLowerCase().trim(),
-        'inviterAddress': _inviterAddress,
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-      };
-
-      // Save channel to workspace database
-      final result = await OrbitDBService.addMessage(dbAddress, channelMessage);
-      if (result == null) {
-        throw Exception('Failed to save channel');
-      }
-
-      // Create channel database for messages
-      final channelDbName =
-          'channel_${_inviterAddress}_${widget.workspaceName}_$channelName';
-      final channelDbAddress =
-          await OrbitDBService.createChatDB(channelDbName);
-      if (channelDbAddress == null) {
-        print('⚠️ Warning: Could not create channel database');
-      }
-
-      // Update local channels list
-      setState(() {
-        _channels.add(channelName);
-      });
-
-      print('✅ Channel "$channelName" created successfully');
+      print('✅ Channel "$channelName" created successfully and saved to database');
     } catch (e) {
       print('❌ Error creating channel: $e');
       rethrow;
@@ -2055,7 +1820,7 @@ class _WorkspaceDrawerState extends State<WorkspaceDrawer> {
 
     try {
       if (widget.userAddress.isNotEmpty) {
-        final workspaces = await OrbitDBService.getUserWorkspaces(widget.userAddress);
+        final workspaces = await DistributedService.getUserWorkspaces(widget.userAddress);
         setState(() {
           _workspaces = workspaces;
           _isLoading = false;
@@ -2076,7 +1841,8 @@ class _WorkspaceDrawerState extends State<WorkspaceDrawer> {
   Future<void> _switchWorkspace(String workspaceName, String inviterAddress) async {
     try {
       // Save new workspace to session
-      await OrbitDBService.saveLoginSession(
+      // Save new workspace to session
+      await SessionService.saveLoginSession(
         widget.userAddress,
         workspaceName,
         'general', // Default channel
@@ -2632,7 +2398,7 @@ class _WorkspaceDrawerState extends State<WorkspaceDrawer> {
               InkWell(
                 onTap: () async {
                   // Clear login session on logout
-                  await OrbitDBService.clearLoginSession();
+                  await SessionService.clearLoginSession();
                   print('🚪 Logging out (session cleared)');
 
                   Navigator.of(context).pop();
@@ -2715,34 +2481,30 @@ class _UserProfilePageState extends State<UserProfilePage> {
     });
 
     try {
-      final key = widget.userAddress.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-
-      if (dbAddress != null) {
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        
-        for (var message in messages) {
-          if (message['type'] == 'profile' &&
-              message['userAddress']?.toString().toLowerCase() == key) {
-            setState(() {
-              _profileData = message;
-              _isLoading = false;
-            });
-            return;
-          }
+      final profile = await DistributedService.getUserProfile(widget.userAddress);
+      if (profile != null) {
+        if (mounted) {
+          setState(() {
+            _profileData = profile;
+            _isLoading = false;
+          });
         }
+        return;
       }
 
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     } catch (e) {
       print('❌ Error loading profile: $e');
-      setState(() {
-        _isLoading = false;
-        _status = 'Error loading profile: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _status = 'Error loading profile: $e';
+        });
+      }
     }
   }
 
@@ -2787,7 +2549,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
     );
 
     if (confirm == true && mounted) {
-      await OrbitDBService.clearLoginSession();
+      await SessionService.clearLoginSession();
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (context) => const LoginScreen()),
@@ -3040,31 +2802,6 @@ class _UserProfilePageState extends State<UserProfilePage> {
                     ),
                   ),
                   const SizedBox(height: 32),
-                  // Status message
-                  if (_status.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20),
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: _status.contains('Error')
-                              ? Colors.red.withOpacity(0.1)
-                              : Colors.green.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          _status,
-                          style: TextStyle(
-                            color: _status.contains('Error')
-                                ? Colors.red[700]
-                                : Colors.green[700],
-                            fontSize: 14,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: 24),
                 ],
               ),
             ),
@@ -3141,6 +2878,5 @@ class _UserProfilePageState extends State<UserProfilePage> {
       ),
     );
   }
+
 }
-
-

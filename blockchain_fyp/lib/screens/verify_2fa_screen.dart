@@ -5,7 +5,8 @@ import 'dart:convert';
 import '../services/email_otp_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/biometric_service.dart';
-import '../services/orbitdb_service.dart';
+import '../services/session_service.dart';
+import '../services/distributed_service.dart';
 import '../services/invite_link_manager.dart';
 import '../services/invite_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -555,34 +556,21 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
   Future<void> _navigateToHome() async {
     if (mounted) {
       try {
-        // Fetch workspace details from OrbitDB
+        // Fetch workspace details from MongoDB
         String workspaceName = 'YourWorkspace';
         String channelName = 'general';
         
         try {
-          final key = widget.userAddress.toLowerCase().trim();
-          final dbName = 'workspace_$key';
-          final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-          
-          if (dbAddress != null) {
-            final messages = await OrbitDBService.getMessages(dbAddress);
-            
-            // Find workspace message for this user
-            for (var message in messages) {
-              if (message['type'] == 'workspace' && message['userAddress'] == key) {
-                final workspaceDetails = jsonDecode(message['workspaceDetails']);
-                workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
-                channelName = workspaceDetails['channelName'] ?? channelName;
-                break;
-              }
-            }
-          }
+           final workspaces = await DistributedService.getUserWorkspaces(widget.userAddress);
+           if (workspaces.isNotEmpty) {
+             workspaceName = workspaces.first['workspace_id'] ?? 'YourWorkspace';
+           }
         } catch (e) {
           print('Error fetching workspace details: $e');
         }
         
         // Save login session to persistent storage
-        await OrbitDBService.saveLoginSession(widget.userAddress, workspaceName, channelName);
+        await SessionService.saveLoginSession(widget.userAddress, workspaceName, channelName);
         
         // Check for pending invites
         final pendingInvite = await InviteLinkManager.instance.consumePendingInvite();

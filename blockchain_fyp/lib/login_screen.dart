@@ -6,9 +6,10 @@ import 'package:walletconnect_flutter_v2/walletconnect_flutter_v2.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'ProfileSetup.dart';
 import 'services/contract_service.dart';
-import 'services/orbitdb_service.dart';
+import 'services/session_service.dart';
+import 'services/distributed_service.dart';
 import 'workspace_home_page.dart';
-import 'dart:convert'; // Added for jsonDecode
+import 'dart:convert';
 import 'services/invite_link_manager.dart';
 import 'services/invite_service.dart';
 import 'screens/accept_invite_screen.dart';
@@ -155,20 +156,12 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 });
                 
                 if (mounted) {
-                  // Get user email from profile
+                  // Get user email from MongoDB profile
                   String? userEmail;
                   try {
-                    final key = address.toLowerCase().trim();
-                    final dbName = 'profile_$key';
-                    final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-                    if (dbAddress != null) {
-                      final messages = await OrbitDBService.getMessages(dbAddress);
-                      for (var message in messages) {
-                        if (message['type'] == 'profile' && message['userAddress'] == key) {
-                          userEmail = message['email']?.toString();
-                          break;
-                        }
-                      }
+                    final profile = await DistributedService.getUserProfile(address);
+                    if (profile != null) {
+                      userEmail = profile['email']?.toString();
                     }
                   } catch (e) {
                     print('Error fetching user email: $e');
@@ -195,34 +188,23 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 _isLoading = false;
               });
               if (mounted) {
-                // Fetch workspace details from OrbitDB
-                String workspaceName = 'YourWorkspace';
-                String channelName = 'general';
-                
-                try {
-                  final key = address.toLowerCase().trim();
-                  final dbName = 'workspace_$key';
-                  final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-                  
-                  if (dbAddress != null) {
-                    final messages = await OrbitDBService.getMessages(dbAddress);
-                    
-                    // Find workspace message for this user
-                    for (var message in messages) {
-                      if (message['type'] == 'workspace' && message['userAddress'] == key) {
-                        final workspaceDetails = jsonDecode(message['workspaceDetails']);
-                        workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
-                        channelName = workspaceDetails['channelName'] ?? channelName;
-                        break;
-                      }
-                    }
-                  }
-                } catch (e) {
-                  print('Error fetching workspace details: $e');
+                // Fetch workspace details from MongoDB
+              String workspaceName = 'YourWorkspace';
+              String channelName = 'general';
+              
+              try {
+                final workspaces = await DistributedService.getUserWorkspaces(address);
+                if (workspaces.isNotEmpty) {
+                  final firstWorkspace = workspaces.first;
+                  workspaceName = firstWorkspace['name'] ?? workspaceName;
+                  channelName = 'general'; // Default channel
                 }
-                
-                // Save login session to persistent storage
-                await OrbitDBService.saveLoginSession(address, workspaceName, channelName);
+              } catch (e) {
+                print('Error fetching workspace details: $e');
+              }
+              
+              // Save login session
+              await SessionService.saveLoginSession(address, workspaceName, channelName);
 
                 final pendingInvite =
                     await InviteLinkManager.instance.consumePendingInvite();

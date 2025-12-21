@@ -1,0 +1,319 @@
+{
+  "info": {
+    "name": "Distributed System Tests",
+    "description": "Complete test collection for Distributed System",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/health",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "2. Node Registration",
+      "item": [
+        {
+          "name": "Register Node 1",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"node_name\": \"Node-Device-1\",\n  \"ip_address\": \"192.168.1.100\",\n  \"tcp_port\": 3001\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/register",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "register"]
+            }
+          }
+        },
+        {
+          "name": "Register Node 2",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"node_name\": \"Node-Device-2\",\n  \"ip_address\": \"192.168.1.101\",\n  \"tcp_port\": 3002\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/register",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "register"]
+            }
+          }
+        },
+        {
+          "name": "Register Node 3",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"node_name\": \"Node-Device-3\",\n  \"ip_address\": \"192.168.1.102\",\n  \"tcp_port\": 3003\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/register",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "register"]
+            }
+          }
+        },
+        {
+          "name": "Get All Nodes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3000/api/nodes",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Chain Building",
+      "item": [
+        {
+          "name": "Build Chain",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/build-chain",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "build-chain"]
+            }
+          }
+        },
+        {
+          "name": "Get Chain Structure",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/chain",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "chain"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Hash Integrity",
+      "item": [
+        {
+          "name": "Add Block 0 (Genesis)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"message\",\n  \"sender_address\": \"0xUserA123\",\n  \"receiver_address\": \"0xUserB456\",\n  \"content\": \"Hello World - Block 0\",\n  \"workspace_id\": \"ws_test123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/{{nodeId}}/ledger",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "{{nodeId}}", "ledger"]
+            }
+          }
+        },
+        {
+          "name": "Add Block 1",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"message\",\n  \"sender_address\": \"0xUserA123\",\n  \"receiver_address\": \"0xUserB456\",\n  \"content\": \"This is Block 1\",\n  \"workspace_id\": \"ws_test123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/{{nodeId}}/ledger",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "{{nodeId}}", "ledger"]
+            }
+          }
+        },
+        {
+          "name": "Add Block 2",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"message\",\n  \"sender_address\": \"0xUserA123\",\n  \"receiver_address\": \"0xUserB456\",\n  \"content\": \"This is Block 2\",\n  \"workspace_id\": \"ws_test123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/{{nodeId}}/ledger",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "{{nodeId}}", "ledger"]
+            }
+          }
+        },
+        {
+          "name": "Get Ledger",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/{{nodeId}}/ledger",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "{{nodeId}}", "ledger"]
+            }
+          }
+        },
+        {
+          "name": "Verify Chain",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/{{nodeId}}/verify",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "{{nodeId}}", "verify"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. UserA to UserB Communication",
+      "item": [
+        {
+          "name": "Send Message UserA to UserB",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"message\",\n  \"sender_address\": \"0xUserA123\",\n  \"receiver_address\": \"0xUserB456\",\n  \"content\": \"Hello UserB, how are you?\",\n  \"workspace_id\": \"ws_test123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/{{nodeId}}/ledger",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "{{nodeId}}", "ledger"]
+            }
+          }
+        },
+        {
+          "name": "Send Message UserB to UserA",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"message\",\n  \"sender_address\": \"0xUserB456\",\n  \"receiver_address\": \"0xUserA123\",\n  \"content\": \"Hi UserA, I'm doing great!\",\n  \"workspace_id\": \"ws_test123\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/{{nodeId}}/ledger",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "{{nodeId}}", "ledger"]
+            }
+          }
+        },
+        {
+          "name": "Get Messages Between Users",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3000/api/nodes/messages/0xUserA123/0xUserB456",
+              "protocol": "http",
+              "host": ["localhost"],
+              "port": "3000",
+              "path": ["api", "nodes", "messages", "0xUserA123", "0xUserB456"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "nodeId",
+      "value": "node_abc123",
+      "type": "string"
+    }
+  ]
+}
+

@@ -1,17 +1,18 @@
-import 'dart:io';
-import 'dart:typed_data';
+import 'package:blockchain_fyp/workspace_home_page.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:get_it/get_it.dart';
-import 'services/ipfs_service.dart';
-import 'services/orbitdb_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'services/distributed_service.dart';
+import 'services/session_service.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/services.dart';
 
 class DirectMessagePage extends StatefulWidget {
@@ -31,8 +32,9 @@ class DirectMessagePage extends StatefulWidget {
 }
 
 class _DirectMessagePageState extends State<DirectMessagePage> {
-  final IPFSService ipfsService = GetIt.I<IPFSService>();
-  final OrbitDBService orbitDBService = GetIt.I<OrbitDBService>();
+  // Removed GetIt services
+  // final IPFSService ipfsService = GetIt.I<IPFSService>();
+  // final OrbitDBService orbitDBService = GetIt.I<OrbitDBService>();
   String status = '';
   final TextEditingController _messageController = TextEditingController();
   final List<Map<String, dynamic>> _messages = [];
@@ -96,21 +98,9 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
     if (_fileCache.containsKey(cid)) {
       return _fileCache[cid];
     }
-    if (_downloadFutures.containsKey(cid)) {
-      return _downloadFutures[cid];
-    }
-    final downloadFuture = OrbitDBService.downloadFile(cid).then((bytes) {
-      if (bytes != null) {
-        _fileCache[cid] = bytes;
-      }
-      _downloadFutures.remove(cid);
-      return bytes;
-    }).catchError((error) {
-      _downloadFutures.remove(cid);
-      return null;
-    });
-    _downloadFutures[cid] = downloadFuture;
-    return downloadFuture;
+    // Stub: File download not yet implemented in MongoDB/GridFS
+    print('⚠️ MongoDB: File download stub called for CID: $cid');
+    return null;
   }
 
   @override
@@ -130,7 +120,7 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
       }
       if (userAddress == null) return;
 
-      List<Map<String, dynamic>> loaded = await OrbitDBService.getDirectMessages(
+      List<Map<String, dynamic>> loaded = await DistributedService.getDirectMessages(
         user1Address: userAddress!,
         user2Address: widget.memberAddress,
       );
@@ -148,7 +138,7 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
           _messages.clear();
           _messages.addAll(loaded);
         });
-        _preloadMediaFiles(loaded);
+        // _preloadMediaFiles(loaded);
       }
     } catch (e) {
       print('❌ Error checking for new messages: $e');
@@ -157,7 +147,7 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
 
   Future<void> _loadUserAddress() async {
     try {
-      final session = await OrbitDBService.getLoginSession();
+      final session = await SessionService.getLoginSession();
       userAddress = session['userAddress'];
     } catch (e) {
       print('❌ Error loading user address: $e');
@@ -181,21 +171,13 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
       }
       if (userAddress == null) return null;
       
-      final key = userAddress!.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      
-      if (dbAddress != null) {
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        for (var message in messages) {
-          if (message['type'] == 'profile' && message['userAddress'] == key) {
-            return message['username'];
-          }
-        }
+      final profile = await DistributedService.getUserProfile(userAddress!);
+      if (profile != null) {
+        return profile['username'];
       }
       return null;
     } catch (e) {
-      print('Error loading username from OrbitDB: $e');
+      print('Error loading username from MongoDB: $e');
       return null;
     }
   }
@@ -212,7 +194,7 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
         return;
       }
 
-      List<Map<String, dynamic>> loaded = await OrbitDBService.getDirectMessages(
+      List<Map<String, dynamic>> loaded = await DistributedService.getDirectMessages(
         user1Address: userAddress!,
         user2Address: widget.memberAddress,
       );
@@ -230,12 +212,42 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
         _messages.addAll(loaded);
       });
 
-      _preloadMediaFiles(loaded);
+      // _preloadMediaFiles(loaded);
+    } on ChainBrokenException catch (e) {
+      // Chain integrity compromised - hide all messages and show error
+      print('❌ Chain integrity compromised: ${e.message}');
+      print('   Broken at: ${e.brokenAt}');
+      
+      if (mounted) {
+        setState(() {
+          _messages.clear(); // Hide all messages
+          status = '⚠️ Data integrity compromised. Messages cannot be displayed for security reasons.';
+        });
+        
+        // Show error dialog to user
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '⚠️ Data integrity check failed. Messages are hidden for security.',
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+            backgroundColor: Colors.red[700],
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
     } catch (e) {
       print('❌ Error loading messages: $e');
-      setState(() {
-        status = 'Failed to load messages: $e';
-      });
+      if (mounted) {
+        setState(() {
+          status = 'Failed to load messages: $e';
+        });
+      }
     }
   }
 
@@ -283,15 +295,27 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
         });
       });
       
+      final messageText = _messageController.text.trim();
       _messageController.clear();
       
-      final success = await OrbitDBService.addDirectMessage(
+      // Get node ID first
+      final nodeId = await DistributedService.getFirstNodeId();
+      if (nodeId == null) {
+        setState(() {
+          _messages.removeLast();
+          status = 'No node available. Please check backend connection.';
+        });
+        return;
+      }
+      
+      final messageId = await DistributedService.addMessage(
+        workspaceId: widget.workspaceName,
         senderAddress: userAddress!,
         receiverAddress: widget.memberAddress,
-        message: msg,
+        messageText: messageText,
       );
       
-      if (!success) {
+      if (messageId == null) {
         setState(() {
           _messages.removeLast();
           status = 'Failed to send message';
@@ -301,244 +325,24 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
   }
 
   Future<void> _takePicture() async {
-    try {
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      
-      final ImagePicker picker = ImagePicker();
-      final XFile? image = await picker.pickImage(
-        source: ImageSource.camera,
-        imageQuality: 85,
-      );
-      
-      if (image != null) {
-        final imageBytes = await image.readAsBytes();
-        final fileName = image.name;
-        
-        setState(() {
-          status = 'Uploading image...';
-        });
-        
-        final uploadResult = await OrbitDBService.uploadFile(
-          widget.workspaceName,
-          fileName,
-          imageBytes,
-        );
-        
-        if (uploadResult != null && uploadResult['success'] == true) {
-          final fileCid = uploadResult['fileCid'];
-          
-          if (!_fileCache.containsKey(fileCid)) {
-            _fileCache[fileCid] = imageBytes;
-          }
-          
-          final isImageFile = fileName.toLowerCase().endsWith('.jpg') ||
-              fileName.toLowerCase().endsWith('.jpeg') ||
-              fileName.toLowerCase().endsWith('.png') ||
-              fileName.toLowerCase().endsWith('.gif');
-          
-          final msg = {
-            'type': isImageFile ? 'image' : 'file',
-            'content': isImageFile ? 'Image: $fileName' : 'File: $fileName',
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'fileName': fileName,
-            'fileSize': imageBytes.length,
-            'cid': fileCid,
-            'fileCid': fileCid,
-            'senderName': currentUserName,
-            'sender': currentUserName,
-            'userAddress': userAddress ?? '',
-          };
-          
-          setState(() {
-            _messages.add({
-              ...msg,
-              'timestamp': DateTime.now(),
-            });
-            status = 'Image sent successfully!';
-          });
-          
-          final success = await OrbitDBService.addDirectMessage(
-            senderAddress: userAddress!,
-            receiverAddress: widget.memberAddress,
-            message: msg,
-          );
-          
-          if (!success) {
-            setState(() {
-              _messages.removeLast();
-              status = 'Failed to save image message';
-            });
-          }
-        }
-      }
-    } catch (e) {
-      print('❌ Error taking picture: $e');
-      setState(() {
-        status = 'Error taking picture: $e';
-      });
-    }
+     print('⚠️ MongoDB: _takePicture stub called - GridFS implementation pending');
+     setState(() {
+       status = 'Image upload not yet available';
+     });
   }
 
   Future<void> _pickImageFromGallery() async {
-    try {
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      
-      final ImagePicker picker = ImagePicker();
-      final XFile? media = await picker.pickMedia(
-        imageQuality: 85,
-        maxWidth: 1920,
-        maxHeight: 1920,
-      );
-      
-      if (media != null) {
-        final file = media;
-        final fileBytes = await file.readAsBytes();
-        final fileName = file.name;
-        final isVideo = fileName.toLowerCase().endsWith('.mp4') ||
-            fileName.toLowerCase().endsWith('.mov') ||
-            fileName.toLowerCase().endsWith('.avi');
-        
-        setState(() {
-          status = 'Uploading...';
-        });
-        
-        final uploadResult = await OrbitDBService.uploadFile(
-          widget.workspaceName,
-          fileName,
-          fileBytes,
-        );
-        
-        if (uploadResult != null && uploadResult['success'] == true) {
-          final fileCid = uploadResult['fileCid'];
-          
-          if (!_fileCache.containsKey(fileCid)) {
-            _fileCache[fileCid] = fileBytes;
-          }
-          
-          final msg = {
-            'type': isVideo ? 'video' : 'image',
-            'content': isVideo ? 'Video: $fileName' : 'Image: $fileName',
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'fileName': fileName,
-            'fileSize': fileBytes.length,
-            'cid': fileCid,
-            'fileCid': fileCid,
-            'senderName': currentUserName,
-            'sender': currentUserName,
-            'userAddress': userAddress ?? '',
-          };
-          
-          setState(() {
-            _messages.add({
-              ...msg,
-              'timestamp': DateTime.now(),
-            });
-            status = 'Media sent successfully!';
-          });
-          
-          final success = await OrbitDBService.addDirectMessage(
-            senderAddress: userAddress!,
-            receiverAddress: widget.memberAddress,
-            message: msg,
-          );
-          
-          if (!success) {
-            setState(() {
-              _messages.removeLast();
-              status = 'Failed to save media message';
-            });
-          }
-        }
-      }
-    } catch (e) {
-      print('❌ Error picking media: $e');
-      setState(() {
-        status = 'Error selecting media: $e';
-      });
-    }
+     print('⚠️ MongoDB: _pickImageFromGallery stub called - GridFS implementation pending');
+     setState(() {
+       status = 'Media upload not yet available';
+     });
   }
 
   Future<void> uploadFile() async {
-    try {
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      
-      setState(() {
-        status = 'Selecting file...';
-      });
-      
-      FilePickerResult? result = await FilePicker.platform.pickFiles(
-        type: FileType.any,
-      );
-      
-      if (result != null) {
-        File file = File(result.files.single.path!);
-        final fileSize = await file.length();
-        Uint8List fileBytes = await file.readAsBytes();
-        
-        setState(() {
-          status = 'Uploading file...';
-        });
-        
-        final uploadResult = await OrbitDBService.uploadFile(
-          widget.workspaceName,
-          result.files.single.name,
-          fileBytes,
-        );
-        
-        if (uploadResult != null && uploadResult['success'] == true) {
-          final fileCid = uploadResult['fileCid'];
-          
-          if (!_fileCache.containsKey(fileCid)) {
-            _fileCache[fileCid] = fileBytes;
-          }
-          
-          final msg = {
-            'type': 'file',
-            'content': 'File: ${result.files.single.name}',
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'fileName': result.files.single.name,
-            'fileSize': fileSize,
-            'cid': fileCid,
-            'fileCid': fileCid,
-            'senderName': currentUserName,
-            'sender': currentUserName,
-            'userAddress': userAddress ?? '',
-          };
-          
-          setState(() {
-            _messages.add({
-              ...msg,
-              'timestamp': DateTime.now(),
-            });
-            status = 'File uploaded successfully!';
-          });
-          
-          final success = await OrbitDBService.addDirectMessage(
-            senderAddress: userAddress!,
-            receiverAddress: widget.memberAddress,
-            message: msg,
-          );
-          
-          if (!success) {
-            setState(() {
-              _messages.removeLast();
-              status = 'Failed to save file message';
-            });
-          }
-        }
-      }
-    } catch (e) {
-      print('❌ Error uploading file: $e');
-      setState(() {
-        status = 'Error uploading file: $e';
-      });
-    }
+     print('⚠️ MongoDB: uploadFile stub called - GridFS implementation pending');
+     setState(() {
+       status = 'File upload not yet available';
+     });
   }
 
   Future<void> _startRecording() async {
@@ -656,81 +460,10 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
   }
 
   Future<void> _sendVoiceMessage(String path) async {
-    try {
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      if (userAddress == null) return;
-      
-      setState(() {
-        _isUploading = true;
-        status = 'Uploading voice message...';
-      });
-      
-      final file = File(path);
-      final fileBytes = await file.readAsBytes();
-      final fileName = 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
-      
-      final uploadResult = await OrbitDBService.uploadFile(
-        widget.workspaceName,
-        fileName,
-        fileBytes,
-      );
-      
-      if (uploadResult != null && uploadResult['success'] == true) {
-        final fileCid = uploadResult['fileCid'];
-        
-        final msg = {
-          'type': 'audio',
-          'content': 'Voice message',
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-          'fileName': fileName,
-          'fileSize': fileBytes.length,
-          'cid': fileCid,
-          'fileCid': fileCid,
-          'senderName': currentUserName,
-          'sender': currentUserName,
-          'userAddress': userAddress ?? '',
-          'duration': _recordingDuration.inMilliseconds,
-        };
-        
-        setState(() {
-          _messages.add({
-            ...msg,
-            'timestamp': DateTime.now(),
-          });
-          status = 'Voice message sent!';
-        });
-        
-        final success = await OrbitDBService.addDirectMessage(
-          senderAddress: userAddress!,
-          receiverAddress: widget.memberAddress,
-          message: msg,
-        );
-        
-        if (!success) {
-          setState(() {
-            _messages.removeLast();
-            status = 'Failed to save voice message';
-          });
-        }
-        
-        await file.delete();
-      }
-      
-      setState(() {
-        _isUploading = false;
-        _recordingDuration = Duration.zero;
-        _recordingPath = null;
-        _waveformData.clear();
-      });
-    } catch (e) {
-      print('❌ Error sending voice message: $e');
-      setState(() {
-        _isUploading = false;
-        status = 'Error sending voice message: $e';
-      });
-    }
+     print('⚠️ MongoDB: _sendVoiceMessage stub called - GridFS implementation pending');
+     setState(() {
+       status = 'Voice message not yet available';
+     });
   }
 
   Future<void> _toggleLockRecording() async {

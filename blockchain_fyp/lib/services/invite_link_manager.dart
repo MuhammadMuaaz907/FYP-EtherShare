@@ -56,19 +56,39 @@ class InviteLinkManager {
   /// Parse an invite link string (deeplink or https fallback) to [InviteLinkData].
   static InviteLinkData? parseLink(String raw) {
     if (raw.isEmpty) {
+      debugPrint('❌ Parse link: Empty link provided');
       return null;
     }
 
-    final trimmed = raw.trim();
+    // Clean and trim the link
+    var trimmed = raw.trim();
+    
+    // Remove any extra whitespace or newlines
+    trimmed = trimmed.replaceAll(RegExp(r'\s+'), ' ').trim();
+    
+    // Handle cases where user might have copied link with extra text
+    // Try to extract URL if it's embedded in text
+    final urlPattern = RegExp(
+      r'(https?://[^\s]+|ethershare://[^\s]+)',
+      caseSensitive: false,
+    );
+    final match = urlPattern.firstMatch(trimmed);
+    if (match != null) {
+      trimmed = match.group(1)!;
+    }
+
+    debugPrint('🔍 Parsing invite link: $trimmed');
 
     Uri uri;
     try {
       uri = Uri.parse(trimmed);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('❌ Parse link: Invalid URI format - $e');
       return null;
     }
 
     if (!uri.hasAuthority && uri.scheme.isEmpty) {
+      debugPrint('❌ Parse link: No authority or scheme');
       return null;
     }
 
@@ -78,28 +98,48 @@ class InviteLinkManager {
 
     if (scheme == 'ethershare') {
       if (uri.host.toLowerCase() != 'invite') {
+        debugPrint('❌ Parse link: Invalid host for ethershare scheme: ${uri.host}');
         return null;
       }
       workspaceSlug = uri.queryParameters['workspace'] ?? '';
       inviterAddress = uri.queryParameters['inviter'] ?? '';
-    } else if (scheme == 'https') {
-      if (uri.host.toLowerCase() != 'ethershare.app') {
-        return null;
-      }
+    } else if (scheme == 'https' || scheme == 'http') {
+      // Support both ethershare.app and any domain (for flexibility)
       if (uri.pathSegments.isEmpty ||
           uri.pathSegments.first.toLowerCase() != 'invite') {
+        debugPrint('❌ Parse link: Invalid path for https scheme: ${uri.path}');
         return null;
       }
       workspaceSlug = uri.queryParameters['workspace'] ?? '';
       inviterAddress = uri.queryParameters['inviter'] ?? '';
     } else {
+      debugPrint('❌ Parse link: Unsupported scheme: $scheme');
       return null;
     }
+
+    // Decode URL-encoded parameters
+    workspaceSlug = Uri.decodeComponent(workspaceSlug);
+    inviterAddress = Uri.decodeComponent(inviterAddress);
+
+    // Trim and validate
+    workspaceSlug = workspaceSlug.trim();
+    inviterAddress = inviterAddress.trim();
+
+    debugPrint('📋 Parsed link data:');
+    debugPrint('   Workspace Slug: $workspaceSlug');
+    debugPrint('   Inviter Address: $inviterAddress');
 
     if (workspaceSlug.isEmpty || inviterAddress.isEmpty) {
+      debugPrint('❌ Parse link: Missing workspace slug or inviter address');
       return null;
     }
 
+    if (inviterAddress == 'unknown') {
+      debugPrint('⚠️ Parse link: Inviter address is "unknown"');
+    }
+
+    debugPrint('✅ Link parsed successfully');
+    
     return InviteLinkData(
       workspaceSlug: workspaceSlug,
       inviterAddress: inviterAddress,

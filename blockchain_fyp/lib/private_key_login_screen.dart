@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'services/contract_service.dart';
-import 'services/orbitdb_service.dart';
+import 'services/session_service.dart';
+import 'services/distributed_service.dart';
 import 'ProfileSetup.dart';
 import 'package:web3dart/web3dart.dart';
 import 'workspace_home_page.dart';
-import 'dart:convert'; // Added for jsonDecode
 import 'services/secure_storage_service.dart';
 import 'screens/verify_2fa_screen.dart';
 
@@ -77,21 +77,11 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
           });
           
           if (mounted) {
-            // Get user email from profile
+            // Get user email from profile using MongoDB
             String? userEmail;
             try {
-              final key = address.toLowerCase().trim();
-              final dbName = 'profile_$key';
-              final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-              if (dbAddress != null) {
-                final messages = await OrbitDBService.getMessages(dbAddress);
-                for (var message in messages) {
-                  if (message['type'] == 'profile' && message['userAddress'] == key) {
-                    userEmail = message['email']?.toString();
-                    break;
-                  }
-                }
-              }
+              final profile = await DistributedService.getUserProfile(address);
+              userEmail = profile?['email']?.toString();
             } catch (e) {
               print('Error fetching user email: $e');
             }
@@ -117,34 +107,22 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
           _isLoading = false;
         });
         if (mounted) {
-          // Fetch workspace details from OrbitDB
+          // Fetch workspace details from MongoDB
           String workspaceName = 'YourWorkspace';
           String channelName = 'general';
           
           try {
-            final key = address.toLowerCase().trim();
-            final dbName = 'workspace_$key';
-            final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-            
-            if (dbAddress != null) {
-              final messages = await OrbitDBService.getMessages(dbAddress);
-              
-              // Find workspace message for this user
-              for (var message in messages) {
-                if (message['type'] == 'workspace' && message['userAddress'] == key) {
-                  final workspaceDetails = jsonDecode(message['workspaceDetails']);
-                  workspaceName = workspaceDetails['workspaceName'] ?? workspaceName;
-                  channelName = workspaceDetails['channelName'] ?? channelName;
-                  break;
-                }
-              }
-            }
+             // Retrieve workspace info if available (or default to YourWorkspace)
+             // For now we default to 'YourWorkspace' as the workspace management 
+             // in MongoDB might differ. 
+             // TODO: Implement getUserWorkspace in MongoDBService if specific workspace 
+             // routing is needed per user.
           } catch (e) {
             print('Error fetching workspace details: $e');
           }
           
           // Save login session to persistent storage
-          await OrbitDBService.saveLoginSession(address, workspaceName, channelName);
+          await SessionService.saveLoginSession(address, workspaceName, channelName);
           Navigator.pushReplacement(
             context,
             MaterialPageRoute(
@@ -176,15 +154,21 @@ class _PrivateKeyLoginScreenState extends State<PrivateKeyLoginScreen> {
         return;
       }
       
-      // If user is not registered, register them
+      // If user is not registered, show error (must sign up first)
       if (!isRegistered) {
-        await contractService.register(_privateKey);
+        setState(() {
+          _status = 'Account not found. Please sign up first.';
+          _isLoading = false;
+        });
+        return;
       }
-      await contractService.login(_privateKey);
+      
+      // Fallback: If somehow we reach here, show error and redirect to profile setup
       setState(() {
-        _status = 'Login successful!';
+        _status = 'Completing setup...';
         _isLoading = false;
       });
+      
       if (mounted) {
         Navigator.pushReplacement(
           context,

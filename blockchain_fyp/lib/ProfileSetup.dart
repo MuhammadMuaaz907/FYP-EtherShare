@@ -3,7 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:email_validator/email_validator.dart';
 import 'screens/setup_2fa_screen.dart';
 import 'services/secure_storage_service.dart';
-import 'services/orbitdb_service.dart';
+import 'services/distributed_service.dart';
 
 class ProfileSetupScreen extends StatefulWidget {
   final String address;
@@ -44,30 +44,21 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     }
   }
 
-  /// Load existing profile data from OrbitDB
+  /// Load existing profile data from Distributed System
   Future<void> _loadExistingProfile() async {
     try {
-      final key = widget.address.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
+      final profile = await DistributedService.getUserProfile(widget.address);
 
-      if (dbAddress != null) {
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        
-        for (var message in messages) {
-          if (message['type'] == 'profile' &&
-              message['userAddress']?.toString().toLowerCase() == key) {
-            // Load existing data into controllers
-            setState(() {
-              _firstNameController.text = message['firstName']?.toString() ?? '';
-              _lastNameController.text = message['lastName']?.toString() ?? '';
-              _emailController.text = message['email']?.toString() ?? '';
-              _designationController.text = message['designation']?.toString() ?? '';
-            });
-            print('✅ Loaded existing profile data');
-            return;
-          }
-        }
+      if (profile != null) {
+        // Load existing data into controllers
+        setState(() {
+          _firstNameController.text = profile['firstName']?.toString() ?? '';
+          _lastNameController.text = profile['lastName']?.toString() ?? '';
+          _emailController.text = profile['email']?.toString() ?? '';
+          _designationController.text = profile['designation']?.toString() ?? '';
+        });
+        print('✅ Loaded existing profile data from MongoDB');
+        return;
       }
       
       // Fallback: Try loading from SharedPreferences
@@ -123,11 +114,41 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     }
 
     // Validate email (required for 2FA)
-      if (!_validateEmail(_emailController.text.trim())) {
-        setState(() {
-          _status = _emailError ?? 'Please enter a valid email address';
-        });
-        return;
+    if (!_validateEmail(_emailController.text.trim())) {
+      setState(() {
+        _status = _emailError ?? 'Please enter a valid email address';
+      });
+      return;
+    }
+    
+    // Check username uniqueness before saving
+    final fullName = '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}'.trim();
+    
+    // Check if username is already taken
+    try {
+      final existingProfile = await DistributedService.getUserProfile(widget.address);
+      final currentUsername = existingProfile?['username']?.toString() ?? '';
+      
+      // Only check if username is different from current
+      if (currentUsername.toLowerCase() != fullName.toLowerCase()) {
+        // Check if username is available
+        final testResult = await DistributedService.saveUserProfile(
+          address: widget.address,
+          username: fullName,
+          email: _emailController.text.trim(),
+        );
+        
+        if (testResult['isDuplicate'] == true) {
+          setState(() {
+            _status = testResult['error'] ?? 'Username "$fullName" is already taken. Please choose a different name.';
+            _isLoading = false;
+          });
+          return;
+        }
+      }
+    } catch (e) {
+      print('⚠️ Error checking username uniqueness: $e');
+      // Continue with save - backend will catch duplicates
     }
 
     setState(() {
@@ -136,107 +157,149 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     });
 
     try {
-      // Save profile to OrbitDB instead of local storage
-      final key = widget.address.toLowerCase().trim();
-      final dbName = 'profile_$key';
+      // Save profile to MongoDB
+      print('💾 Saving profile to MongoDB...');
+      print('📝 User address: ${widget.address}');
+      print('📝 First Name: ${_firstNameController.text.trim()}');
+      print('📝 Last Name: ${_lastNameController.text.trim()}');
+      print('📝 Designation: ${_designationController.text.trim()}');
+      print('📝 Email: ${_emailController.text.trim()}');
       
-      // Create the database first (this will store the address in cache)
-      final dbAddress = await OrbitDBService.createChatDB(dbName);
+      // Combine first and last name for username (backward compatibility)
+      final fullName = '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}'.trim();
       
-        print('💾 Saving profile to database: $dbAddress');
-        print('📝 Database name: $dbName');
-        print('📝 User address: $key');
-        print('📝 First Name: ${_firstNameController.text.trim()}');
-        print('📝 Last Name: ${_lastNameController.text.trim()}');
-        print('📝 Designation: ${_designationController.text.trim()}');
-        print('📝 Email: ${_emailController.text.trim()}');
+      // Always save to local storage first (offline support)
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('username', fullName);
+      await prefs.setString('firstName', _firstNameController.text.trim());
+      await prefs.setString('lastName', _lastNameController.text.trim());
+      await prefs.setString('designation', _designationController.text.trim());
+      await prefs.setString('email', _emailController.text.trim());
+      
+      // Store email securely for 2FA
+      if (_emailController.text.trim().isNotEmpty && _storageService != null) {
+        await _storageService!.storeSecureData('2fa_email', _emailController.text.trim());
+        print('✅ Email stored securely for 2FA: ${_emailController.text.trim()}');
+      }
+      
+      print('✅ Profile saved to local storage');
+      
+      // Try to save to Distributed System (backend)
+      final result = await DistributedService.saveUserProfile(
+        address: widget.address,
+        username: fullName,
+        email: _emailController.text.trim(),
+      );
+      
+      if (result['success'] == true) {
+        print('✅ Profile saved successfully to MongoDB');
         
-        if (dbAddress != null) {
-          // Combine first and last name for username (backward compatibility)
-          final fullName = '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}'.trim();
-          
-          final profileMessage = {
-            'type': 'profile',
-            'userAddress': key,
-            'username': fullName,
-            'firstName': _firstNameController.text.trim(),
-            'lastName': _lastNameController.text.trim(),
-            'designation': _designationController.text.trim(),
-            'email': _emailController.text.trim(),
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-          };
-          
-          print('📋 Profile message to save: $profileMessage');
-          print('📋 Profile message keys: ${profileMessage.keys.toList()}');
-          
-          final result = await OrbitDBService.addMessage(dbAddress, profileMessage);
-          
-          if (result != null) {
-            print('✅ Profile saved successfully with hash: $result');
-            print('📌 Database address cached for future use: $dbAddress');
-            print('📌 Database name: $dbName');
-            
-            // Verify the save by immediately reading it back
-            print('🔍 Verifying profile save...');
-            final verifyMessages = await OrbitDBService.getMessages(dbAddress);
-            print('📨 Retrieved ${verifyMessages.length} messages after save');
-            for (var msg in verifyMessages) {
-              print('📄 Message: type=${msg['type']}, userAddress=${msg['userAddress']}, username=${msg['username']}');
-            }
-          
-          // Also save to SharedPreferences for backward compatibility
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('username', fullName);
-          await prefs.setString('firstName', _firstNameController.text.trim());
-          await prefs.setString('lastName', _lastNameController.text.trim());
-          await prefs.setString('designation', _designationController.text.trim());
-          await prefs.setString('email', _emailController.text.trim());
-          
-          // Store email securely for 2FA
-          if (_emailController.text.trim().isNotEmpty && _storageService != null) {
-            await _storageService!.storeSecureData('2fa_email', _emailController.text.trim());
-            print('Email stored securely for 2FA: ${_emailController.text.trim()}');
-          }
-          
-          setState(() {
-            _isLoading = false;
-            _status = 'Profile saved successfully!';
-          });
-          
-          // Navigate to 2FA setup only if show2FASetup is true (onboarding flow)
-          if (widget.show2FASetup) {
-            await Future.delayed(const Duration(milliseconds: 500));
-            if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _status = 'Profile saved successfully!';
+        });
+        
+        // Navigate to 2FA setup only if show2FASetup is true (onboarding flow)
+        if (widget.show2FASetup) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (mounted) {
             Navigator.pushReplacement(
               context,
-                MaterialPageRoute(
-                  builder: (_) => Setup2FAScreen(
-                    userId: widget.address,
-                    preFilledEmail: _emailController.text.trim(),
-                  ),
+              MaterialPageRoute(
+                builder: (_) => Setup2FAScreen(
+                  userId: widget.address,
+                  preFilledEmail: _emailController.text.trim(),
                 ),
+              ),
             );
-            }
-          } else {
-            // For edit mode, just pop back to profile page
-            await Future.delayed(const Duration(milliseconds: 500));
-            if (mounted) {
-              Navigator.pop(context, true); // Return true to indicate success
-            }
           }
         } else {
-          print('❌ Failed to save profile message');
-          setState(() {
-            _isLoading = false;
-            _status = 'Error saving profile to OrbitDB';
-          });
+          // For edit mode, just pop back to profile page
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (mounted) {
+            Navigator.pop(context, true); // Return true to indicate success
+          }
         }
       } else {
-        print('❌ Failed to create profile database');
-        setState(() {
-          _status = 'Error creating profile database';
-          _isLoading = false;
-        });
+        // Backend save failed, but local save succeeded
+        final errorMsg = result['error'] ?? 'Unknown error';
+        final isNetworkError = result['isNetworkError'] == true;
+        
+        print('⚠️ Failed to save profile to MongoDB: $errorMsg');
+        print('✅ Profile saved locally - will sync when backend is available');
+        
+        // Show user-friendly message
+        String userMessage;
+        if (isNetworkError) {
+          userMessage = 'Profile saved locally!\n\n'
+              '⚠️ Could not connect to server.\n'
+              'Your profile is saved on this device and will sync when the server is available.\n\n'
+              'To fix:\n'
+              '1. Ensure backend server is running\n'
+              '2. Check your network connection\n'
+              '3. Verify PC IP address is correct';
+        } else {
+          userMessage = 'Profile saved locally!\n\n'
+              '⚠️ Server error: $errorMsg\n'
+              'Your profile is saved on this device.';
+        }
+        
+        // Show dialog with option to continue or retry
+        if (mounted) {
+          final shouldContinue = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Profile Saved Locally'),
+              content: Text(userMessage),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false), // Retry
+                  child: const Text('Retry'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context, true), // Continue
+                  child: const Text('Continue'),
+                ),
+              ],
+            ),
+          );
+          
+          if (shouldContinue == true) {
+            // User chose to continue - proceed with navigation
+            setState(() {
+              _isLoading = false;
+              _status = 'Profile saved locally';
+            });
+            
+            if (widget.show2FASetup) {
+              await Future.delayed(const Duration(milliseconds: 500));
+              if (mounted) {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => Setup2FAScreen(
+                      userId: widget.address,
+                      preFilledEmail: _emailController.text.trim(),
+                    ),
+                  ),
+                );
+              }
+            } else {
+              await Future.delayed(const Duration(milliseconds: 500));
+              if (mounted) {
+                Navigator.pop(context, true);
+              }
+            }
+          } else {
+            // User chose to retry - call save again
+            setState(() {
+              _isLoading = false;
+              _status = 'Retrying...';
+            });
+            await Future.delayed(const Duration(milliseconds: 500));
+            await _saveProfile(); // Retry
+          }
+        }
       }
     } catch (e) {
       setState(() {

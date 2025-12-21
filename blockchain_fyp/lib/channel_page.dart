@@ -1,11 +1,12 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:blockchain_fyp/workspace_home_page.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:get_it/get_it.dart';
-import 'services/ipfs_service.dart';
-import 'services/orbitdb_service.dart';
+import 'services/distributed_service.dart';
+import 'services/session_service.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -18,17 +19,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 class ChannelPage extends StatefulWidget {
   final String channelName;
   final String workspaceName;
-  
-  const ChannelPage(
-      {super.key, required this.channelName, required this.workspaceName});
+
+  const ChannelPage({
+    super.key,
+    required this.channelName,
+    required this.workspaceName,
+  });
 
   @override
-  _ChannelPageState createState() => _ChannelPageState();
+  State<ChannelPage> createState() => _ChannelPageState();
 }
 
 class _ChannelPageState extends State<ChannelPage> {
-  final IPFSService ipfsService = GetIt.I<IPFSService>();
-  final OrbitDBService orbitDBService = GetIt.I<OrbitDBService>();
   String status = '';
   final TextEditingController _messageController = TextEditingController();
   final List<Map<String, dynamic>> _messages = [];
@@ -36,15 +38,15 @@ class _ChannelPageState extends State<ChannelPage> {
   String? userAddress;
   int _memberCount = 0;
   bool _isLoadingMembers = false;
-  String? _inviterAddress;
+  bool _isLoadingMessages = false;
   bool _hasText = false;
   late VoidCallback _textListener;
-  String _currentChannelName = ''; // Track current channel name (for updates)
+  String _currentChannelName = '';
+  bool _messagesLoaded = false;
 
-  // Cache for downloaded files/images to avoid reloading
+  // Cache for downloaded files/images
   final Map<String, Uint8List?> _fileCache = {};
-  final Map<String, Future<Uint8List?>> _downloadFutures =
-      {}; // Track ongoing downloads
+  final Map<String, Future<Uint8List?>> _downloadFutures = {};
 
   // Voice recording
   final AudioRecorder _audioRecorder = AudioRecorder();
@@ -53,23 +55,23 @@ class _ChannelPageState extends State<ChannelPage> {
   String? _recordingPath;
   Duration _recordingDuration = Duration.zero;
   Timer? _recordingTimer;
-  String? _playingAudioId; // Track which audio is currently playing
-  bool _isLocked = false; // Lock recording mode
-  double _recordingAmplitude = 0.0; // For visual feedback
+  String? _playingAudioId;
+  bool _isLocked = false;
+  double _recordingAmplitude = 0.0;
   Timer? _amplitudeTimer;
-  bool _isUploading = false; // Track upload state
+  bool _isUploading = false;
   StreamSubscription<PlayerState>? _playerStateSubscription;
   StreamSubscription<Duration>? _positionSubscription;
   Duration _audioPosition = Duration.zero;
   Duration _audioDuration = Duration.zero;
-  List<double> _waveformData = []; // For wave line animation
-  Offset? _panStartPosition; // Track pan gesture start
+  List<double> _waveformData = [];
+  Offset? _panStartPosition;
 
   @override
   void initState() {
     super.initState();
-    _currentChannelName = widget.channelName; // Initialize with widget channel name
-    _resolveChannelDisplayName(); // Resolve display name if channel was renamed
+    _currentChannelName = widget.channelName;
+    _resolveChannelDisplayName();
     _loadUserNameAndMessages();
     _loadWorkspaceMembers();
     _textListener = () {
@@ -79,162 +81,27 @@ class _ChannelPageState extends State<ChannelPage> {
     };
     _messageController.addListener(_textListener);
   }
-  
-  /// Resolve channel display name (check if channel was renamed)
-  /// Checks both SharedPreferences and OrbitDB for rename actions
-  /// SharedPreferences takes priority as it's updated immediately after rename
+
+  /// Resolve channel display name from SharedPreferences (takes priority)
   Future<void> _resolveChannelDisplayName() async {
     try {
-      String? resolvedName;
       final prefs = await SharedPreferences.getInstance();
-      
-      // Step 1: First, check SharedPreferences (fastest and most up-to-date)
-      // SharedPreferences is updated immediately after rename, so it's the most reliable source
       final mappingKey = 'channel_name_mapping_${widget.workspaceName}_${widget.channelName}';
       final mappedName = prefs.getString(mappingKey);
-      
+
       if (mappedName != null && mappedName.isNotEmpty) {
-        resolvedName = mappedName;
-        print('✅ [ResolveName] Found rename in SharedPreferences: "${widget.channelName}" -> "$resolvedName"');
-        
-        // If SharedPreferences has the mapping, use it directly (it's the most recent)
-        // No need to check OrbitDB chain if SharedPreferences already has the answer
         setState(() {
-          _currentChannelName = resolvedName!; // Safe: we checked it's not null above
+          _currentChannelName = mappedName;
         });
-        print('✅ [ResolveName] Channel display name resolved from SharedPreferences: "$_currentChannelName"');
-        return; // Early return - SharedPreferences takes precedence
+        return;
       }
-      
-      // Step 2: If not in SharedPreferences, check OrbitDB for rename actions
-      // This handles cases where SharedPreferences might be missing (e.g., after app reinstall)
-      // Build a rename chain to handle multiple renames
-      if (_inviterAddress == null) {
-        _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-            widget.workspaceName);
-      }
-      
-      if (_inviterAddress != null) {
-        final workspaceDbName = 'workspace_$_inviterAddress';
-        final dbAddress = await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
-        
-        if (dbAddress != null) {
-          final messages = await OrbitDBService.getMessages(dbAddress);
-          
-          // Collect all rename actions for this workspace
-          final List<Map<String, dynamic>> renameActions = [];
-          for (var message in messages) {
-            if (message['type'] == 'channel_rename' &&
-                message['workspaceName'] == widget.workspaceName) {
-              final oldName = message['oldChannelName']?.toString();
-              final newName = message['newChannelName']?.toString();
-              final timestamp = message['timestamp'];
-              
-              if (oldName != null && newName != null && timestamp is int) {
-                renameActions.add({
-                  'oldName': oldName.toLowerCase(),
-                  'newName': newName,
-                  'timestamp': timestamp,
-                });
-              }
-            }
-          }
-          
-          if (renameActions.isNotEmpty) {
-            // Use widget.channelName as the starting point (this is the original DB name)
-            // Don't trace backwards - widget.channelName is always the original name used for DB operations
-            String startName = widget.channelName.toLowerCase();
-            print('📍 [ResolveName] Starting rename chain from original DB name: "$startName"');
-            
-            // Build rename chain forward from original name to get latest name
-            String currentName = startName;
-            String? finalName;
-            bool foundChain = false;
-            final Set<String> visitedNames = {}; // Track visited names to prevent cycles
-            final int maxIterations = 100; // Safety limit
-            int iterations = 0;
-            
-            // Keep following the rename chain forward until we can't find more renames
-            while (iterations < maxIterations) {
-              iterations++;
-              
-              // Prevent infinite loops: if we've seen this name before, we're in a cycle
-              if (visitedNames.contains(currentName)) {
-                print('⚠️ [ResolveName] Detected cycle at "$currentName", breaking chain');
-                break;
-              }
-              visitedNames.add(currentName);
-              
-              // Find the most recent rename where oldName matches currentName
-              Map<String, dynamic>? bestRename;
-              int bestTimestamp = 0;
-              
-              for (var rename in renameActions) {
-                final renameOldName = rename['oldName']?.toString().toLowerCase();
-                if (renameOldName == currentName &&
-                    rename['timestamp'] is int &&
-                    rename['timestamp'] > bestTimestamp) {
-                  bestRename = rename;
-                  bestTimestamp = rename['timestamp'] as int;
-                }
-              }
-              
-              if (bestRename != null) {
-                foundChain = true;
-                finalName = bestRename['newName'] as String;
-                final newNameLower = finalName.toLowerCase();
-                
-                // Check if we're about to create a cycle
-                if (visitedNames.contains(newNameLower)) {
-                  print('⚠️ [ResolveName] Would create cycle: "$currentName" -> "$finalName" (already visited), stopping');
-                  break;
-                }
-                
-                currentName = newNameLower;
-                print('🔗 [ResolveName] Following rename chain: "${bestRename['oldName']}" -> "$finalName" (timestamp: $bestTimestamp)');
-              } else {
-                // No more renames in chain - current name is the latest
-                break;
-              }
-            }
-            
-            if (iterations >= maxIterations) {
-              print('⚠️ [ResolveName] Reached max iterations ($maxIterations), breaking to prevent infinite loop');
-            }
-            
-            if (foundChain && finalName != null && finalName.isNotEmpty) {
-              // Found rename chain in OrbitDB
-              resolvedName = finalName;
-              print('✅ [ResolveName] Found rename chain in OrbitDB: "$startName" -> "$resolvedName"');
-              
-              // Update SharedPreferences to keep it in sync for future lookups
-              final originalMappingKey = 'channel_name_mapping_${widget.workspaceName}_$startName';
-              await prefs.setString(originalMappingKey, resolvedName);
-              final reverseMappingKey = 'channel_old_name_${widget.workspaceName}_$resolvedName';
-              await prefs.setString(reverseMappingKey, startName);
-            }
-          } else {
-            print('ℹ️ [ResolveName] No rename actions found in OrbitDB for this workspace');
-          }
-        }
-      }
-      
-      // Update display name if we found a rename
-      if (resolvedName != null && resolvedName.isNotEmpty) {
-        setState(() {
-          _currentChannelName = resolvedName!; // Safe: we checked it's not null above
-        });
-        print('✅ [ResolveName] Channel display name resolved: "$_currentChannelName"');
-      } else {
-        // No rename found, use original name
-        setState(() {
-          _currentChannelName = widget.channelName;
-        });
-        print('ℹ️ [ResolveName] No rename found, using original name: "${widget.channelName}"');
-      }
+
+      // Fallback to original name (OrbitDB rename logic disabled/stubbed)
+      setState(() {
+        _currentChannelName = widget.channelName;
+      });
     } catch (e) {
-      print('❌ Error resolving channel display name: $e');
-      // Fallback to original name on error
+      print('Error resolving channel display name: $e');
       setState(() {
         _currentChannelName = widget.channelName;
       });
@@ -245,10 +112,8 @@ class _ChannelPageState extends State<ChannelPage> {
   void dispose() {
     _messageController.removeListener(_textListener);
     _messageController.dispose();
-    // Clear cache on dispose to free memory
     _fileCache.clear();
     _downloadFutures.clear();
-    // Stop recording and release resources
     _stopRecording();
     _recordingTimer?.cancel();
     _amplitudeTimer?.cancel();
@@ -256,192 +121,141 @@ class _ChannelPageState extends State<ChannelPage> {
     _positionSubscription?.cancel();
     _audioRecorder.dispose();
     _audioPlayer.dispose();
+    // Reset flag so messages reload when page is reopened
+    _messagesLoaded = false;
     super.dispose();
   }
 
-  /// Get file from cache or download if not cached
   Future<Uint8List?> _getCachedFile(String cid) async {
     // Check cache first
     if (_fileCache.containsKey(cid)) {
-      print('✅ [Cache] File found in cache: $cid');
       return _fileCache[cid];
     }
-
+    
     // Check if download is already in progress
     if (_downloadFutures.containsKey(cid)) {
-      print('⏳ [Cache] Download already in progress: $cid');
       return _downloadFutures[cid];
     }
 
-    // Start download and cache it
-    print('📥 [Cache] Downloading file: $cid');
-    final downloadFuture = OrbitDBService.downloadFile(cid).then((bytes) {
-      // Cache the result
-      if (bytes != null) {
-        _fileCache[cid] = bytes;
-        print('✅ [Cache] File cached: $cid (${bytes.length} bytes)');
+    // Try to download from backend
+    // Check if cid looks like a fileId (starts with 'file_') or is a local ID
+    if (cid.startsWith('file_')) {
+      // It's a fileId from backend, download it
+      print('📥 Downloading file from backend: $cid');
+      final future = DistributedService.downloadFile(cid);
+      _downloadFutures[cid] = future;
+      
+      try {
+        final bytes = await future;
+        if (bytes != null && mounted) {
+          _fileCache[cid] = bytes;
+          print('✅ File downloaded and cached: $cid (${bytes.length} bytes)');
+        }
+        return bytes;
+      } catch (e) {
+        print('❌ Error downloading file: $e');
+        return null;
       }
-      // Remove from ongoing downloads
-      _downloadFutures.remove(cid);
-      return bytes;
-    }).catchError((error) {
-      // Remove from ongoing downloads on error
-      _downloadFutures.remove(cid);
-      print('❌ [Cache] Download failed: $cid - $error');
-      throw error;
-    });
-
-    // Store the future to prevent duplicate downloads
-    _downloadFutures[cid] = downloadFuture;
-    return downloadFuture;
+    } else if (cid.startsWith('local_')) {
+      // It's a local file ID, check cache
+      print('ℹ️ Local file ID: $cid (not available for download)');
+      return null;
+    } else {
+      // Unknown format, try as fileId anyway
+      print('📥 Attempting to download file: $cid');
+      final future = DistributedService.downloadFile(cid);
+      _downloadFutures[cid] = future;
+      
+      try {
+        final bytes = await future;
+        if (bytes != null && mounted) {
+          _fileCache[cid] = bytes;
+          print('✅ File downloaded and cached: $cid');
+        }
+        return bytes;
+      } catch (e) {
+        print('❌ Error downloading file: $e');
+        return null;
+      }
+    }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Re-resolve channel name in case it was renamed while away
     _resolveChannelDisplayName();
-    
-    // Only reload messages if they're empty (first load)
-    // Cache is preserved, so images/files won't reload
-    if (_messages.isEmpty) {
-    _loadMessages();
-    } else {
-      // If messages exist, just check for new ones without clearing cache
-      _checkForNewMessages();
+
+    // Reload messages when page is reopened (only if not already loading and not already loaded)
+    // This ensures messages are fresh from database when returning to the page
+    // The _isLoadingMessages flag prevents multiple simultaneous loads
+    if (!_isLoadingMessages && !_messagesLoaded && mounted) {
+      _loadMessages();
     }
   }
 
-  /// Check for new messages without clearing existing cache
   Future<void> _checkForNewMessages() async {
     try {
-      List<Map<String, dynamic>> loaded =
-          await OrbitDBService.getChannelMessages(
-              widget.workspaceName, widget.channelName);
+      final loaded = await DistributedService.getChannelMessages(
+        workspaceId: widget.workspaceName,
+        channelId: widget.channelName,
+      );
 
-      // Parse timestamps
       for (var msg in loaded) {
         if (msg['timestamp'] is String) {
-          msg['timestamp'] =
-              DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
+          msg['timestamp'] = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
         } else if (msg['timestamp'] is int) {
-          msg['timestamp'] =
-              DateTime.fromMillisecondsSinceEpoch(msg['timestamp']);
+          msg['timestamp'] = DateTime.fromMillisecondsSinceEpoch(msg['timestamp']);
         }
       }
 
-      // Only update if message count changed (new messages)
       if (loaded.length != _messages.length) {
         setState(() {
           _messages.clear();
           _messages.addAll(loaded);
         });
-        // Preload any new media files
         _preloadMediaFiles(loaded);
       }
     } catch (e) {
-      print('❌ Error checking for new messages: $e');
+      print('Error checking for new messages: $e');
     }
   }
 
   Future<void> _loadUserAddress() async {
     try {
-      final session = await OrbitDBService.getLoginSession();
+      final session = await SessionService.getLoginSession();
       userAddress = session['userAddress'];
     } catch (e) {
-      print('❌ Error loading user address: $e');
+      print('Error loading user address: $e');
     }
   }
 
   Future<void> _loadUserNameAndMessages() async {
-    // Load user name from OrbitDB instead of SharedPreferences
     try {
       await _loadUserAddress();
-      currentUserName = await _getUserNameFromOrbitDB() ?? 'User';
+      currentUserName = (await _getUserNameFromMongoDB()) ?? 'User';
     } catch (_) {
       currentUserName = 'User';
     }
     await _loadMessages();
   }
 
-  Future<String?> _getUserNameFromOrbitDB() async {
-    try {
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      if (userAddress == null) return null;
-      
-      final key = userAddress!.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      
-      if (dbAddress != null) {
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        
-        for (var message in messages) {
-          if (message['type'] == 'profile' && message['userAddress'] == key) {
-            return message['username'];
-          }
-        }
-      }
-      return null;
-    } catch (e) {
-      print('Error loading username from OrbitDB: $e');
-      return null;
-    }
+  Future<String?> _getUserNameFromMongoDB() async {
+    if (userAddress == null) return null;
+      final profile = await DistributedService.getUserProfile(userAddress!);
+    return profile?['username'];
   }
 
   Future<void> _loadWorkspaceMembers() async {
-    setState(() {
-      _isLoadingMembers = true;
-    });
-
+    setState(() => _isLoadingMembers = true);
     try {
-      // Ensure user address is loaded
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-
-      // Find the inviter address for this workspace
-      _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-          widget.workspaceName);
-      
-      if (_inviterAddress == null) {
-        setState(() {
-          _isLoadingMembers = false;
-          _memberCount = 0;
-        });
-        return;
-      }
-
-      final members = await OrbitDBService.getWorkspaceMembers(
-        inviterAddress: _inviterAddress!,
-        workspaceName: widget.workspaceName,
-      );
-
-      // Ensure current logged-in user is in the count
-      if (userAddress != null) {
-        final userKey = userAddress!.toLowerCase().trim();
-        final userExists = members.any(
-            (m) => m['memberAddress']?.toString().toLowerCase() == userKey);
-        if (!userExists) {
-          // User is not in the list, but they should be counted
-          // The actual list will be updated when showing channel info
-        }
-      }
-
+      if (userAddress == null) await _loadUserAddress();
+      final members = await DistributedService.getWorkspaceMembers(widget.workspaceName);
       setState(() {
-        _memberCount = members.length +
-            (userAddress != null &&
-                    !members.any((m) =>
-                        m['memberAddress']?.toString().toLowerCase() ==
-                        userAddress!.toLowerCase())
-                ? 1
-                : 0);
+        _memberCount = members.length;
         _isLoadingMembers = false;
       });
     } catch (e) {
-      print('❌ Error loading workspace member count: $e');
+      print('Error loading workspace members: $e');
       setState(() {
         _isLoadingMembers = false;
         _memberCount = 0;
@@ -449,183 +263,288 @@ class _ChannelPageState extends State<ChannelPage> {
     }
   }
 
-  /// Get profile name (username) for a given address
   Future<String?> _getProfileNameForAddress(String address) async {
     try {
-      final key = address.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      print('🔍 [Channel] Fetching profile name for: $address (db: $dbName)');
-      
-      // Try to get existing database first
-      var dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      
-      // If database doesn't exist, try creating it (it might be a new profile)
-      if (dbAddress == null) {
-        print(
-            '⚠️ [Channel] Profile database not found in cache, trying to create: $dbName');
-        dbAddress = await OrbitDBService.createChatDB(dbName);
-        if (dbAddress == null) {
-          print(
-              '❌ [Channel] Could not create/find profile database for: $address');
-          return null;
-        }
-      }
-      
-      print('📌 [Channel] Using profile database: $dbAddress');
-      final messages = await OrbitDBService.getMessages(dbAddress);
-      print(
-          '📨 [Channel] Retrieved ${messages.length} messages from profile database');
-      
-      if (messages.isEmpty) {
-        print('⚠️ [Channel] Profile database is empty for: $address');
-        return null;
-      }
-      
-      // Look for profile message
-      for (var message in messages) {
-        final msgType = message['type']?.toString();
-        print('🔍 [Channel] Checking message: type=$msgType');
-        print('🔍 [Channel] Message keys: ${message.keys.toList()}');
-        print('🔍 [Channel] Full message: ${message.toString()}');
-        
-        if (msgType == 'profile') {
-          final msgUserAddress =
-              message['userAddress']?.toString().toLowerCase().trim();
-          print(
-              '🔍 [Channel] Profile message userAddress: $msgUserAddress (looking for: $key)');
-          
-          if (msgUserAddress == key) {
-            // Try multiple ways to get username
-            dynamic usernameValue = message['username'];
-            String? username;
-            
-            if (usernameValue != null) {
-              username = usernameValue.toString().trim();
-            }
-            
-            print(
-                '✅ [Channel] Found profile - Username value: $usernameValue, Username string: "$username" for address: $address');
-            
-            if (username != null && username.isNotEmpty) {
-              print('✅ [Channel] Returning username: $username');
-              return username;
-            } else {
-              print(
-                  '⚠️ [Channel] Username is null or empty in profile for: $address');
-              print(
-                  '⚠️ [Channel] Username value type: ${usernameValue.runtimeType}');
-            }
-          } else {
-            print(
-                '⚠️ [Channel] userAddress mismatch: expected=$key, got=$msgUserAddress');
-          }
-        } else {
-          print('⚠️ [Channel] Message type is not profile: $msgType');
-        }
-      }
-      
-      print(
-          '⚠️ [Channel] No valid profile message found for address: $address');
-      return null;
-    } catch (e, stackTrace) {
-      print('❌ [Channel] Error getting profile name for $address: $e');
-      print('Stack trace: $stackTrace');
+      final profile = await DistributedService.getUserProfile(address);
+      return profile?['username'];
+    } catch (e) {
+      debugPrint('Error getting profile name: $e');
       return null;
     }
   }
 
   Future<void> _loadMessages() async {
-    try {
-      print('📨 [LoadMessages] Loading messages for channel: "${widget.channelName}" in workspace: "${widget.workspaceName}"');
-      print('📨 [LoadMessages] Database will use: chat_${widget.workspaceName}_${widget.channelName}');
-      
-      List<Map<String, dynamic>> loaded =
-          await OrbitDBService.getChannelMessages(
-              widget.workspaceName, widget.channelName);
-      
-      // Debug: Print loaded messages to see their structure
-      print('📨 [LoadMessages] Loaded ${loaded.length} messages from database');
-      if (loaded.isNotEmpty) {
-        for (var msg in loaded.take(3)) { // Only print first 3 to avoid spam
-          final content = msg['content']?.toString() ?? '';
-          final contentPreview = content.length > 30 ? '${content.substring(0, 30)}...' : content;
-          print('  - Type: ${msg['type']}, Content: $contentPreview, FileName: ${msg['fileName']}');
-        }
-        if (loaded.length > 3) {
-          print('  ... and ${loaded.length - 3} more messages');
-        }
-      } else {
-        print('⚠️ [LoadMessages] No messages found in database. This might be normal for a new channel.');
-      }
-      
-    // Parse timestamps back to DateTime
-    for (var msg in loaded) {
-      if (msg['timestamp'] is String) {
-          msg['timestamp'] =
-              DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
-        } else if (msg['timestamp'] is int) {
-          msg['timestamp'] =
-              DateTime.fromMillisecondsSinceEpoch(msg['timestamp']);
-      }
-    }
-      
-    setState(() {
-      _messages.clear();
-      _messages.addAll(loaded);
-    });
-
-      // Preload images/files immediately and aggressively (non-blocking)
-      _preloadMediaFiles(loaded);
-    } catch (e) {
-      print('❌ Error loading messages: $e');
-      setState(() {
-        status = 'Failed to load messages: $e';
-      });
-    }
-  }
-
-  /// Preload media files (images/videos) aggressively for instant display
-  Future<void> _preloadMediaFiles(List<Map<String, dynamic>> messages) async {
-    // Collect all media CIDs
-    final List<String> mediaCids = [];
-    for (var message in messages) {
-      final cid = message['cid'] ?? message['fileCid'];
-      if (cid != null && cid.toString().isNotEmpty) {
-        final cidStr = cid.toString();
-        // Only preload if not already cached
-        if (!_fileCache.containsKey(cidStr)) {
-          mediaCids.add(cidStr);
-        }
-      }
-    }
-
-    if (mediaCids.isEmpty) {
-      print('✅ [Preload] All media files already cached');
+    // Prevent multiple simultaneous loads
+    if (_isLoadingMessages) {
+      print('⚠️ Messages already loading, skipping...');
       return;
     }
 
-    print('📥 [Preload] Preloading ${mediaCids.length} media files...');
+    // Check if widget is still mounted before setting state
+    if (!mounted) {
+      print('⚠️ Widget not mounted, skipping message load');
+      return;
+    }
 
-    // Preload all files concurrently (but limit concurrency to avoid overwhelming)
-    final int maxConcurrent = 5; // Download 5 files at a time
-    for (int i = 0; i < mediaCids.length; i += maxConcurrent) {
-      final batch = mediaCids.skip(i).take(maxConcurrent).toList();
+    setState(() {
+      _isLoadingMessages = true;
+    });
 
-      // Download batch concurrently
-      await Future.wait(
-        batch.map((cid) => _getCachedFile(cid).catchError((error) {
-              print('⚠️ [Preload] Failed to preload $cid: $error');
-              return null;
-            })),
+    try {
+      print('📥 Loading messages for channel: ${widget.channelName} in workspace: ${widget.workspaceName}');
+      
+      final loaded = await DistributedService.getChannelMessages(
+        workspaceId: widget.workspaceName,
+        channelId: widget.channelName,
       );
 
-      // Small delay between batches to avoid overwhelming network
+      print('✅ Loaded ${loaded.length} messages from database');
+
+      // Transform database format to UI format
+      final transformedMessages = <Map<String, dynamic>>[];
+      
+      for (var msg in loaded) {
+        // Convert timestamp to DateTime
+        DateTime timestamp;
+        if (msg['timestamp'] is String) {
+          timestamp = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
+        } else if (msg['timestamp'] is int) {
+          timestamp = DateTime.fromMillisecondsSinceEpoch(msg['timestamp']);
+        } else if (msg['timestamp'] is DateTime) {
+          timestamp = msg['timestamp'];
+        } else {
+          timestamp = DateTime.now();
+        }
+
+        // Get sender address (try multiple field names)
+        final senderAddress = msg['sender_address']?.toString() ?? 
+                            msg['userAddress']?.toString() ?? 
+                            msg['sender']?.toString() ?? 
+                            '';
+
+        // Skip messages that are completely empty (no content, no file, no type)
+      final hasContent = (msg['content']?.toString() ?? '').trim().isNotEmpty ||
+                        (msg['message_text']?.toString() ?? '').trim().isNotEmpty ||
+                        (msg['messageText']?.toString() ?? '').trim().isNotEmpty;
+      final hasFile = (msg['fileId']?.toString() ?? '').isNotEmpty ||
+                     (msg['file_id']?.toString() ?? '').isNotEmpty ||
+                     (msg['cid']?.toString() ?? '').isNotEmpty ||
+                     (msg['fileCid']?.toString() ?? '').isNotEmpty ||
+                     (msg['fileName']?.toString() ?? '').isNotEmpty;
+      
+      if (!hasContent && !hasFile) {
+        print('⚠️ Skipping empty message: $msg');
+        continue; // Skip this message
+      }
+
+      // Detect message type from content or fileName
+      String? detectedType = msg['type']?.toString();
+      final fileName = msg['fileName']?.toString() ?? '';
+      final content = (msg['content']?.toString() ?? 
+                      msg['message_text']?.toString() ?? 
+                      msg['messageText']?.toString() ?? 
+                      '').trim().toLowerCase();
+      
+      // If type is not set, try to detect from content or fileName
+      if (detectedType == null || detectedType.isEmpty || detectedType == 'text') {
+        if (content.contains('voice message') || fileName.endsWith('.m4a') || fileName.endsWith('.mp3') || fileName.endsWith('.wav') || fileName.endsWith('.aac')) {
+          detectedType = 'audio';
+        } else if (content.contains('image:') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || fileName.endsWith('.png') || fileName.endsWith('.gif') || fileName.endsWith('.webp')) {
+          detectedType = 'image';
+        } else if (content.contains('video:') || fileName.endsWith('.mp4') || fileName.endsWith('.mov') || fileName.endsWith('.avi') || fileName.endsWith('.mkv') || fileName.endsWith('.webm') || fileName.endsWith('.3gp') || fileName.endsWith('.m4v')) {
+          detectedType = 'video';
+        } else if (content.contains('file:') || hasFile) {
+          detectedType = 'file';
+        } else {
+          detectedType = 'text';
+        }
+      }
+
+      // Extract fileId/cid (priority: fileId > file_id > cid > fileCid)
+      final fileId = msg['fileId']?.toString() ?? 
+                     msg['file_id']?.toString() ?? 
+                     msg['cid']?.toString() ?? 
+                     msg['fileCid']?.toString() ?? 
+                     '';
+
+      // Transform message to UI format
+        final transformedMsg = <String, dynamic>{
+          // Keep all original fields first (for compatibility)
+          ...msg,
+          
+          // Then override with transformed values (these take priority)
+          // Content field (priority: content > message_text > messageText)
+          'content': (msg['content']?.toString() ?? 
+                     msg['message_text']?.toString() ?? 
+                     msg['messageText']?.toString() ?? 
+                     '').trim(),
+          
+          // Type field - use detected type
+          'type': detectedType,
+          
+          // Timestamp - MUST be DateTime, not int (set after spread to override)
+          'timestamp': timestamp,
+          
+          // Sender information
+          'userAddress': senderAddress,
+          'sender': msg['sender']?.toString() ?? 
+                   msg['senderName']?.toString() ?? 
+                   '',
+          'senderName': msg['senderName']?.toString() ?? 
+                       msg['sender']?.toString() ?? 
+                       '',
+          
+          // File information (if present) - prioritize fileId
+          'fileName': fileName.isNotEmpty ? fileName : msg['fileName']?.toString(),
+          'fileSize': msg['fileSize'],
+          'fileId': fileId.isNotEmpty ? fileId : null,
+          'cid': fileId.isNotEmpty ? fileId : (msg['cid']?.toString() ?? msg['fileCid']?.toString() ?? ''),
+          'fileCid': fileId.isNotEmpty ? fileId : (msg['fileCid']?.toString() ?? msg['cid']?.toString() ?? ''),
+          
+          // Workspace and channel
+          'workspace': msg['workspace']?.toString() ?? widget.workspaceName,
+          'channel': msg['channel']?.toString() ?? widget.channelName,
+        };
+        
+        // Debug print for media messages
+        if (detectedType != 'text') {
+          print('📎 Media message detected: type=$detectedType, fileId=$fileId, fileName=$fileName');
+        }
+
+        transformedMessages.add(transformedMsg);
+      }
+
+      // Fetch sender names for all messages (in parallel for better performance)
+      print('🔄 Fetching sender names for ${transformedMessages.length} messages...');
+      final senderAddresses = transformedMessages
+          .map((m) => m['userAddress']?.toString())
+          .whereType<String>() // Filter out null values and cast to String
+          .where((addr) => addr.isNotEmpty) // Filter out empty strings
+          .toSet()
+          .toList();
+
+      final senderNameMap = <String, String>{};
+      await Future.wait(
+        senderAddresses.map((address) async {
+          try {
+            final profile = await DistributedService.getUserProfile(address);
+            final username = profile?['username']?.toString();
+            if (username != null && username.isNotEmpty) {
+              senderNameMap[address] = username; // address is String, username is String
+            }
+          } catch (e) {
+            print('⚠️ Error fetching profile for $address: $e');
+          }
+        }),
+      );
+
+      // Update sender names in messages
+      for (var msg in transformedMessages) {
+        final address = msg['userAddress']?.toString();
+        if (address != null && senderNameMap.containsKey(address)) {
+          msg['senderName'] = senderNameMap[address];
+          msg['sender'] = senderNameMap[address];
+        }
+        
+        // If still no sender name, use a fallback
+        if ((msg['senderName'] == null || msg['senderName'].toString().isEmpty) && 
+            address != null && address.isNotEmpty) {
+          msg['senderName'] = address.length > 10 
+              ? '${address.substring(0, 6)}...${address.substring(address.length - 4)}'
+              : address;
+          msg['sender'] = msg['senderName'];
+        }
+      }
+
+      print('✅ Transformed ${transformedMessages.length} messages with sender names');
+
+      // Only update state if widget is still mounted
+      if (mounted) {
+        setState(() {
+          _messages.clear();
+          _messages.addAll(transformedMessages);
+        });
+        print('✅ Messages loaded into UI: ${_messages.length} messages');
+      } else {
+        print('⚠️ Widget disposed, skipping setState');
+      }
+      
+      // Preload media files (async, doesn't need mounted check)
+      _preloadMediaFiles(transformedMessages);
+      
+      // Mark messages as loaded
+      _messagesLoaded = true;
+    } on ChainBrokenException catch (e) {
+      // Chain integrity compromised - hide all messages and show error
+      print('❌ Chain integrity compromised: ${e.message}');
+      print('   Broken at: ${e.brokenAt}');
+      
+      if (mounted) {
+        setState(() {
+          _messages.clear(); // Hide all messages
+          _isLoadingMessages = false;
+          status = '⚠️ Data integrity compromised. Messages cannot be displayed for security reasons.';
+        });
+        
+        // Show error dialog to user
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '⚠️ Data integrity check failed. Messages are hidden for security.',
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+            backgroundColor: Colors.red[700],
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Error loading messages: $e');
+      if (mounted) {
+        setState(() => status = 'Failed to load messages: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingMessages = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _preloadMediaFiles(List<Map<String, dynamic>> messages) async {
+    final mediaCids = <String>[];
+    for (var message in messages) {
+      final cid = message['cid'] ?? message['fileCid'];
+      if (cid != null && cid.toString().isNotEmpty && !_fileCache.containsKey(cid.toString())) {
+        mediaCids.add(cid.toString());
+      }
+    }
+
+    if (mediaCids.isEmpty) return;
+
+    const maxConcurrent = 5;
+    for (var i = 0; i < mediaCids.length; i += maxConcurrent) {
+      final batch = mediaCids.skip(i).take(maxConcurrent).toList();
+      await Future.wait(batch.map((cid) => _getCachedFile(cid)));
       if (i + maxConcurrent < mediaCids.length) {
         await Future.delayed(const Duration(milliseconds: 100));
       }
     }
+  }
 
-    print('✅ [Preload] Completed preloading ${mediaCids.length} media files');
+  // Upload stubs (simulated failure since not implemented)
+  Future<Map<String, dynamic>?> _simulateUpload(Uint8List bytes, String fileName) async {
+    // Stub: returns failure
+    return {'success': false, 'error': 'Uploads not implemented'};
+    // For testing success, uncomment:
+    // final timestamp = DateTime.now().millisecondsSinceEpoch;
+    // return {'success': true, 'fileCid': 'stub_cid_$timestamp'};
   }
 
   Future<void> _takePicture() async {
@@ -667,86 +586,101 @@ class _ChannelPageState extends State<ChannelPage> {
         print('📷 Starting image upload: $fileName (${fileSize} bytes)');
         print('📷 User info - Name: $currentUserName, Address: $userAddress');
 
-        // Upload image using OrbitDB service (which uses IPFS)
-        final uploadResult = await OrbitDBService.uploadFile(
-            widget.workspaceName, fileName, imageBytes);
+        // Upload image to backend
+        print('📤 Uploading image to backend: $fileName');
+        final fileId = await DistributedService.uploadFile(
+          fileBytes: imageBytes,
+          fileName: fileName,
+          workspaceId: widget.workspaceName,
+          uploaderAddress: userAddress!,
+          mimeType: 'image/jpeg',
+        );
 
-        if (uploadResult != null && uploadResult['success'] == true) {
-          print(
-              '✅ Image uploaded successfully. CID: ${uploadResult['fileCid']}');
+        // Determine if it's an image based on file extension
+        final isImageFile = fileName.toLowerCase().endsWith('.jpg') ||
+            fileName.toLowerCase().endsWith('.jpeg') ||
+            fileName.toLowerCase().endsWith('.png') ||
+            fileName.toLowerCase().endsWith('.gif');
 
-          final fileCid = uploadResult['fileCid'];
+        // Create message (even if upload failed, save for offline support)
+        final msg = {
+          'type': isImageFile ? 'image' : 'file',
+          'content': isImageFile ? 'Image: $fileName' : 'File: $fileName',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'fileName': fileName,
+          'fileSize': fileSize,
+          'fileId': fileId, // Store fileId from backend
+          'cid': fileId, // For backward compatibility
+          'fileCid': fileId, // For backward compatibility
+          'senderName': currentUserName,
+          'sender': currentUserName,
+          'userAddress': userAddress ?? '',
+          'workspace': widget.workspaceName,
+          'channel': widget.channelName,
+        };
 
-          // Immediately cache the uploaded image bytes (we already have them)
-          if (!_fileCache.containsKey(fileCid)) {
-            _fileCache[fileCid] = imageBytes;
-            print(
-                '✅ [Cache] Uploaded image cached immediately: $fileCid (${imageBytes.length} bytes)');
+        // Cache image bytes locally for immediate display
+        if (fileId != null) {
+          if (!_fileCache.containsKey(fileId)) {
+            _fileCache[fileId] = imageBytes;
+            print('✅ [Cache] Image cached locally: $fileId (${imageBytes.length} bytes)');
           }
+        } else {
+          // If upload failed, still cache locally
+          final localCid = 'local_img_$timestamp';
+          _fileCache[localCid] = imageBytes;
+          msg['cid'] = localCid;
+          msg['fileCid'] = localCid;
+          print('⚠️ Upload failed, cached locally with ID: $localCid');
+        }
 
-          // Determine if it's an image based on file extension
-          final isImageFile = fileName.toLowerCase().endsWith('.jpg') ||
-              fileName.toLowerCase().endsWith('.jpeg') ||
-              fileName.toLowerCase().endsWith('.png') ||
-              fileName.toLowerCase().endsWith('.gif');
+        print('💬 Saving image message with user info:');
+        print('  - senderName: ${msg['senderName']}');
+        print('  - userAddress: ${msg['userAddress']}');
+        print('  - fileName: ${msg['fileName']}');
+        print('  - fileId: ${msg['fileId']}');
+        print('  - type: ${msg['type']}');
 
-          final msg = {
-            'type': isImageFile ? 'image' : 'file',
-            'content': isImageFile ? 'Image: $fileName' : 'File: $fileName',
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'fileName': fileName,
-            'fileSize': fileSize,
-            'cid': fileCid,
-            'fileCid': fileCid, // For compatibility
-            'senderName': currentUserName,
-            'sender': currentUserName, // For compatibility
-            'userAddress': userAddress ?? '', // Add user address
-            'workspace': widget.workspaceName,
-            'channel': widget.channelName,
-          };
-
-          print('💬 Saving image message with user info:');
-          print('  - senderName: ${msg['senderName']}');
-          print('  - userAddress: ${msg['userAddress']}');
-          print('  - fileName: ${msg['fileName']}');
-          print('  - fileCid: ${msg['fileCid']}');
-          print('  - type: ${msg['type']}');
-
-          // Add to local state immediately
+        // Add to local state immediately
+        if (mounted) {
           setState(() {
             _messages.add({
               ...msg,
               'timestamp': DateTime.now(),
             });
-            status = 'Image sent successfully!';
+            status = fileId != null 
+                ? 'Image sent successfully!' 
+                : 'Image saved locally (upload failed)';
           });
+        }
 
-          // Save to OrbitDB
-          final success = await OrbitDBService.addChannelMessage(
-              widget.workspaceName, widget.channelName, msg);
-          if (!success) {
-            // If save failed, remove from local state
+        // Save to database
+        final result = await DistributedService.addMessage(
+          workspaceId: widget.workspaceName,
+          channelId: widget.channelName,
+          senderAddress: userAddress!,
+          messageText: msg['content'].toString(),
+          fileId: fileId, // Link message with file
+        );
+        
+        final success = result != null;
+        if (!success) {
+          if (mounted) {
             setState(() {
               _messages.removeLast();
               status = 'Failed to save image message';
             });
-            print('❌ Failed to save image message to OrbitDB');
-          } else {
-            print('✅ Image message saved successfully with user info');
-            // Clear status after a short delay
-            Future.delayed(const Duration(seconds: 2), () {
-              if (mounted) {
-                setState(() {
-                  status = '';
-                });
-              }
-            });
           }
+          print('❌ Failed to save image message to database');
         } else {
-          print(
-              '❌ Image upload failed: ${uploadResult?['error'] ?? 'Unknown error'}');
-          setState(() {
-            status = 'Failed to upload image. Please check IPFS connection.';
+          print('✅ Image message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}');
+          // Clear status after a short delay
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted) {
+              setState(() {
+                status = '';
+              });
+            }
           });
         }
       } else {
@@ -817,93 +751,112 @@ class _ChannelPageState extends State<ChannelPage> {
         print('🖼️ Media type: ${isVideo ? 'Video' : 'Image'}');
         print('🖼️ User info - Name: $currentUserName, Address: $userAddress');
 
-        // Upload media using OrbitDB service (which uses IPFS)
-        final uploadResult = await OrbitDBService.uploadFile(
-            widget.workspaceName, finalFileName, mediaBytes);
+        // Upload media to backend
+        print('📤 Uploading gallery media to backend: $finalFileName');
+        final mimeType = isVideo 
+            ? 'video/mp4' 
+            : (finalFileName.toLowerCase().endsWith('.png') 
+                ? 'image/png' 
+                : 'image/jpeg');
+        
+        final fileId = await DistributedService.uploadFile(
+          fileBytes: mediaBytes,
+          fileName: finalFileName,
+          workspaceId: widget.workspaceName,
+          uploaderAddress: userAddress!,
+          mimeType: mimeType,
+        );
 
-        if (uploadResult != null && uploadResult['success'] == true) {
-          print(
-              '✅ Gallery media uploaded successfully. CID: ${uploadResult['fileCid']}');
+        // Determine if it's an image based on file extension
+        final isImageFile = finalFileName.toLowerCase().endsWith('.jpg') ||
+            finalFileName.toLowerCase().endsWith('.jpeg') ||
+            finalFileName.toLowerCase().endsWith('.png') ||
+            finalFileName.toLowerCase().endsWith('.gif') ||
+            finalFileName.toLowerCase().endsWith('.webp');
 
-          final fileCid = uploadResult['fileCid'];
+        // Create message (even if upload failed, save for offline support)
+        final msg = {
+          'type': isVideo ? 'video' : (isImageFile ? 'image' : 'file'),
+          'content': isVideo
+              ? 'Video: $finalFileName'
+              : (isImageFile
+                  ? 'Image: $finalFileName'
+                  : 'File: $finalFileName'),
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'fileName': finalFileName,
+          'fileSize': fileSize,
+          'fileId': fileId, // Store fileId from backend
+          'cid': fileId, // For backward compatibility
+          'fileCid': fileId, // For backward compatibility
+          'senderName': currentUserName,
+          'sender': currentUserName,
+          'userAddress': userAddress ?? '',
+          'workspace': widget.workspaceName,
+          'channel': widget.channelName,
+        };
 
-          // Immediately cache the uploaded media bytes (we already have them)
-          if (!_fileCache.containsKey(fileCid)) {
-            _fileCache[fileCid] = mediaBytes;
-            print(
-                '✅ [Cache] Uploaded media cached immediately: $fileCid (${mediaBytes.length} bytes)');
+        // Cache media bytes locally for immediate display
+        if (fileId != null) {
+          if (!_fileCache.containsKey(fileId)) {
+            _fileCache[fileId] = mediaBytes;
+            print('✅ [Cache] Media cached locally: $fileId (${mediaBytes.length} bytes)');
           }
+        } else {
+          // If upload failed, still cache locally
+          final localCid = 'local_media_$timestamp';
+          _fileCache[localCid] = mediaBytes;
+          msg['cid'] = localCid;
+          msg['fileCid'] = localCid;
+          print('⚠️ Upload failed, cached locally with ID: $localCid');
+        }
 
-          // Determine if it's an image based on file extension
-          final isImageFile = finalFileName.toLowerCase().endsWith('.jpg') ||
-              finalFileName.toLowerCase().endsWith('.jpeg') ||
-              finalFileName.toLowerCase().endsWith('.png') ||
-              finalFileName.toLowerCase().endsWith('.gif') ||
-              finalFileName.toLowerCase().endsWith('.webp');
+        print('💬 Saving gallery media message with user info:');
+        print('  - senderName: ${msg['senderName']}');
+        print('  - userAddress: ${msg['userAddress']}');
+        print('  - fileName: ${msg['fileName']}');
+        print('  - fileId: ${msg['fileId']}');
+        print('  - type: ${msg['type']}');
 
-          final msg = {
-            'type': isVideo ? 'video' : (isImageFile ? 'image' : 'file'),
-            'content': isVideo
-                ? 'Video: $finalFileName'
-                : (isImageFile
-                    ? 'Image: $finalFileName'
-                    : 'File: $finalFileName'),
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'fileName': finalFileName,
-            'fileSize': fileSize,
-            'cid': fileCid,
-            'fileCid': fileCid, // For compatibility
-            'senderName': currentUserName,
-            'sender': currentUserName, // For compatibility
-            'userAddress': userAddress ?? '', // Add user address
-            'workspace': widget.workspaceName,
-            'channel': widget.channelName,
-          };
-
-          print('💬 Saving gallery media message with user info:');
-          print('  - senderName: ${msg['senderName']}');
-          print('  - userAddress: ${msg['userAddress']}');
-          print('  - fileName: ${msg['fileName']}');
-          print('  - fileCid: ${msg['fileCid']}');
-          print('  - type: ${msg['type']}');
-
-          // Add to local state immediately
+        // Add to local state immediately
+        if (mounted) {
           setState(() {
             _messages.add({
               ...msg,
               'timestamp': DateTime.now(),
             });
-            status = isVideo
-                ? 'Video sent successfully!'
-                : 'Image sent successfully!';
+            status = fileId != null
+                ? (isVideo ? 'Video sent successfully!' : 'Image sent successfully!')
+                : 'Media saved locally (upload failed)';
           });
+        }
 
-          // Save to OrbitDB
-          final success = await OrbitDBService.addChannelMessage(
-              widget.workspaceName, widget.channelName, msg);
-          if (!success) {
-            // If save failed, remove from local state
+        // Save to database
+        final result = await DistributedService.addMessage(
+          workspaceId: widget.workspaceName,
+          channelId: widget.channelName,
+          senderAddress: userAddress!,
+          messageText: msg['content'].toString(),
+          fileId: fileId, // Link message with file
+        );
+        
+        final success = result != null;
+        if (!success) {
+          if (mounted) {
             setState(() {
               _messages.removeLast();
               status = 'Failed to save media message';
             });
-            print('❌ Failed to save gallery media message to OrbitDB');
-          } else {
-            print('✅ Gallery media message saved successfully with user info');
-            // Clear status after a short delay
-            Future.delayed(const Duration(seconds: 2), () {
-              if (mounted) {
-                setState(() {
-                  status = '';
-                });
-              }
-            });
           }
+          print('❌ Failed to save gallery media message to database');
         } else {
-          print(
-              '❌ Gallery media upload failed: ${uploadResult?['error'] ?? 'Unknown error'}');
-          setState(() {
-            status = 'Failed to upload media. Please check IPFS connection.';
+          print('✅ Gallery media message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}');
+          // Clear status after a short delay
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted) {
+              setState(() {
+                status = '';
+              });
+            }
           });
         }
       } else {
@@ -949,72 +902,92 @@ class _ChannelPageState extends State<ChannelPage> {
             '📎 Starting file upload: ${result.files.single.name} (${fileSize} bytes)');
         print('📎 User info - Name: $currentUserName, Address: $userAddress');
         
-        // Upload file using OrbitDB service (which uses IPFS)
-        final uploadResult = await OrbitDBService.uploadFile(
-            widget.workspaceName, result.files.single.name, fileBytes);
-        
-        if (uploadResult != null && uploadResult['success'] == true) {
-          print(
-              '✅ File uploaded successfully. CID: ${uploadResult['fileCid']}');
+        // Upload file to backend
+        print('📤 Uploading file to backend: ${result.files.single.name}');
+        final fileId = await DistributedService.uploadFile(
+          fileBytes: fileBytes,
+          fileName: result.files.single.name,
+          workspaceId: widget.workspaceName,
+          uploaderAddress: userAddress!,
+          mimeType: result.files.single.extension != null 
+              ? 'application/${result.files.single.extension}' 
+              : 'application/octet-stream',
+        );
 
-          final fileCid = uploadResult['fileCid'];
+        // Create message (even if upload failed, save for offline support)
+        final msg = {
+          'type': 'file',
+          'content': 'File: ${result.files.single.name}',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'fileName': result.files.single.name,
+          'fileSize': fileSize,
+          'fileId': fileId, // Store fileId from backend
+          'cid': fileId, // For backward compatibility
+          'fileCid': fileId, // For backward compatibility
+          'senderName': currentUserName,
+          'sender': currentUserName,
+          'userAddress': userAddress ?? '',
+          'workspace': widget.workspaceName,
+          'channel': widget.channelName,
+        };
 
-          // Immediately cache the uploaded file bytes (we already have them)
-          if (!_fileCache.containsKey(fileCid)) {
-            _fileCache[fileCid] = fileBytes;
-            print(
-                '✅ [Cache] Uploaded file cached immediately: $fileCid (${fileBytes.length} bytes)');
+        // Cache file bytes locally (for small files only, to avoid memory issues)
+        if (fileSize < 10 * 1024 * 1024) { // Only cache files < 10MB
+          if (fileId != null) {
+            if (!_fileCache.containsKey(fileId)) {
+              _fileCache[fileId] = fileBytes;
+              print('✅ [Cache] File cached locally: $fileId (${fileBytes.length} bytes)');
+            }
+          } else {
+            // If upload failed, still cache locally for small files
+            final localCid = 'local_file_${DateTime.now().millisecondsSinceEpoch}';
+            _fileCache[localCid] = fileBytes;
+            msg['cid'] = localCid;
+            msg['fileCid'] = localCid;
+            print('⚠️ Upload failed, cached locally with ID: $localCid');
           }
+        }
           
-          final msg = {
-            'type': 'file',
-            'content': 'File: ${result.files.single.name}',
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'fileName': result.files.single.name,
-            'fileSize': fileSize,
-            'cid': fileCid,
-            'fileCid': fileCid, // For compatibility
-            'senderName': currentUserName,
-            'sender': currentUserName, // For compatibility
-            'userAddress': userAddress ?? '', // Add user address
-            'workspace': widget.workspaceName,
-            'channel': widget.channelName,
-          };
+        print('💬 Saving file message with user info:');
+        print('  - senderName: ${msg['senderName']}');
+        print('  - userAddress: ${msg['userAddress']}');
+        print('  - fileName: ${msg['fileName']}');
+        print('  - fileId: ${msg['fileId']}');
+        print('  - fileSize: ${msg['fileSize']} bytes');
           
-          print('💬 Saving file message with user info:');
-          print('  - senderName: ${msg['senderName']}');
-          print('  - userAddress: ${msg['userAddress']}');
-          print('  - fileName: ${msg['fileName']}');
-          print('  - fileCid: ${msg['fileCid']}');
-          
-          // Add to local state immediately
+        // Add to local state immediately
+        if (mounted) {
           setState(() {
             _messages.add({
               ...msg,
               'timestamp': DateTime.now(),
             });
-            status = 'File uploaded successfully!';
+            status = fileId != null 
+                ? 'File uploaded successfully!' 
+                : 'File saved locally (upload failed)';
           });
+        }
           
-          // Save to OrbitDB
-          final success = await OrbitDBService.addChannelMessage(
-              widget.workspaceName, widget.channelName, msg);
-          if (!success) {
-            // If save failed, remove from local state
+        // Save to database
+        final mongoResult = await DistributedService.addMessage(
+          workspaceId: widget.workspaceName,
+          channelId: widget.channelName,
+          senderAddress: userAddress!,
+          messageText: msg['content'].toString(),
+          fileId: fileId, // Link message with file
+        );
+        
+        final success = mongoResult != null;
+        if (!success) {
+          if (mounted) {
             setState(() {
               _messages.removeLast();
               status = 'Failed to save file message';
             });
-            print('❌ Failed to save file message to OrbitDB');
-          } else {
-            print('✅ File message saved successfully with user info');
           }
+          print('❌ Failed to save file message to database');
         } else {
-          print(
-              '❌ File upload failed: ${uploadResult?['error'] ?? 'Unknown error'}');
-          setState(() {
-            status = 'Failed to upload file. Please check IPFS connection.';
-          });
+          print('✅ File message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}');
         }
       } else {
         setState(() {
@@ -1030,53 +1003,38 @@ class _ChannelPageState extends State<ChannelPage> {
   }
 
   void _sendMessage() async {
-    if (_messageController.text.trim().isNotEmpty) {
-      // Ensure user address is loaded
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      
-      final msg = {
-        'type': 'text',
-        'content': _messageController.text.trim(),
-        'timestamp': DateTime.now()
-            .millisecondsSinceEpoch, // Use milliseconds for consistency
-        'senderName': currentUserName,
-        'sender': currentUserName, // For compatibility
-        'userAddress': userAddress ?? '', // Add user address
-        'workspace': widget.workspaceName,
-        'channel': widget.channelName,
-      };
-      
-      print('💬 Sending message with user info:');
-      print('  - senderName: ${msg['senderName']}');
-      print('  - userAddress: ${msg['userAddress']}');
-      print('  - content: ${msg['content']}');
-      
-      // Add to local state immediately for UI responsiveness
+    if (_messageController.text.trim().isEmpty) return;
+
+    if (userAddress == null) await _loadUserAddress();
+
+    final msg = {
+      'type': 'text',
+      'content': _messageController.text.trim(),
+      'timestamp': DateTime.now(),
+      'senderName': currentUserName,
+      'userAddress': userAddress ?? '',
+      'workspace': widget.workspaceName,
+      'channel': widget.channelName,
+    };
+
+    setState(() {
+      _messages.add(msg);
+    });
+
+    _messageController.clear();
+
+    final result = await DistributedService.addMessage(
+      workspaceId: widget.workspaceName,
+      channelId: widget.channelName,
+      senderAddress: userAddress!,
+      messageText: msg['content'].toString(),
+    );
+
+    if (result == null) {
       setState(() {
-        _messages.add({
-          ...msg,
-          'timestamp': DateTime.now(),
-        });
+        _messages.removeLast();
+        status = 'Failed to send message';
       });
-      
-      _messageController.clear();
-      
-      // Save to OrbitDB
-      final success = await OrbitDBService.addChannelMessage(
-          widget.workspaceName, widget.channelName, msg);
-      if (!success) {
-        // If save failed, remove from local state
-        setState(() {
-          _messages.removeLast();
-        });
-        setState(() {
-          status = 'Failed to send message';
-        });
-      } else {
-        print('✅ Message saved successfully with user info');
-      }
     }
   }
 
@@ -1315,92 +1273,119 @@ class _ChannelPageState extends State<ChannelPage> {
       print(
           '🎤 Uploading voice message: $fileName (${fileSize} bytes, ${_formatDuration(_recordingDuration)})');
 
-      // Upload audio file
-      final uploadResult = await OrbitDBService.uploadFile(
-          widget.workspaceName, fileName, audioBytes);
+      // Upload audio file to backend
+      print('📤 Uploading voice message to backend: $fileName');
+      final fileId = await DistributedService.uploadFile(
+        fileBytes: audioBytes,
+        fileName: fileName,
+        workspaceId: widget.workspaceName,
+        uploaderAddress: userAddress!,
+        mimeType: 'audio/m4a',
+      );
 
-      if (uploadResult != null && uploadResult['success'] == true) {
-        final fileCid = uploadResult['fileCid'];
+      // Create message with metadata (even if upload failed, save message for offline support)
+      final msg = {
+        'type': 'audio',
+        'content': 'Voice message: $fileName',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'fileName': fileName,
+        'fileSize': fileSize,
+        'duration': _recordingDuration.inSeconds, // Store duration in seconds
+        'fileId': fileId, // Store fileId from backend
+        'cid': fileId, // For backward compatibility
+        'fileCid': fileId, // For backward compatibility
+        'senderName': currentUserName,
+        'sender': currentUserName,
+        'userAddress': userAddress ?? '',
+        'workspace': widget.workspaceName,
+        'channel': widget.channelName,
+      };
 
-        // Immediately cache the uploaded audio bytes
-        if (!_fileCache.containsKey(fileCid)) {
-          _fileCache[fileCid] = audioBytes;
-          print(
-              '✅ [Cache] Uploaded voice message cached immediately: $fileCid');
+      // Cache audio bytes locally for immediate playback
+      if (fileId != null) {
+        if (!_fileCache.containsKey(fileId)) {
+          _fileCache[fileId] = audioBytes;
+          print('✅ [Cache] Voice message cached locally: $fileId');
         }
+      } else {
+        // If upload failed, still cache locally for offline playback
+        final localCid = 'local_voice_$timestamp';
+        _fileCache[localCid] = audioBytes;
+        msg['cid'] = localCid;
+        msg['fileCid'] = localCid;
+        print('⚠️ Upload failed, cached locally with ID: $localCid');
+      }
 
-        final msg = {
-          'type': 'audio',
-          'content': 'Voice message: $fileName',
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-          'fileName': fileName,
-          'fileSize': fileSize,
-          'duration': _recordingDuration.inSeconds, // Store duration in seconds
-          'cid': fileCid,
-          'fileCid': fileCid,
-          'senderName': currentUserName,
-          'sender': currentUserName,
-          'userAddress': userAddress ?? '',
-          'workspace': widget.workspaceName,
-          'channel': widget.channelName,
-        };
+      print('💬 Saving voice message with user info:');
+      print('  - senderName: ${msg['senderName']}');
+      print('  - userAddress: ${msg['userAddress']}');
+      print('  - fileName: ${msg['fileName']}');
+      print('  - duration: ${msg['duration']} seconds');
+      print('  - fileId: ${msg['fileId']}');
 
-        print('💬 Saving voice message with user info:');
-        print('  - senderName: ${msg['senderName']}');
-        print('  - userAddress: ${msg['userAddress']}');
-        print('  - fileName: ${msg['fileName']}');
-        print('  - duration: ${msg['duration']} seconds');
-
-        // Add to local state immediately
+      // Add to local state immediately
+      if (mounted) {
         setState(() {
           _messages.add({
             ...msg,
             'timestamp': DateTime.now(),
           });
-          status = 'Voice message sent! ✓';
+          status = fileId != null 
+              ? 'Voice message sent! ✓' 
+              : 'Voice message saved locally (upload failed)';
           _recordingPath = null;
           _recordingDuration = Duration.zero;
           _isUploading = false;
         });
+      }
 
-        // Save to OrbitDB
-        final success = await OrbitDBService.addChannelMessage(
-            widget.workspaceName, widget.channelName, msg);
-        if (!success) {
+      // Save message to database (with fileId if available)
+      final messageText = fileId != null 
+          ? 'Voice message: $fileName (${_formatDuration(_recordingDuration)})'
+          : 'Voice message: $fileName (${_formatDuration(_recordingDuration)}) [Local]';
+      
+      final success = await DistributedService.addMessage(
+        workspaceId: widget.workspaceName,
+        channelId: widget.channelName,
+        senderAddress: userAddress!,
+        messageText: messageText,
+        fileId: fileId, // Pass fileId to link message with file
+      ) != null;
+      
+      if (!success) {
+        if (mounted) {
           setState(() {
             _messages.removeLast();
             status = 'Failed to save voice message. Please try again.';
             _isUploading = false;
           });
-          print('❌ Failed to save voice message to OrbitDB');
-          HapticFeedback.mediumImpact();
-        } else {
-          print('✅ Voice message saved successfully');
-          HapticFeedback.lightImpact();
-          // Clear status after delay
-          Future.delayed(const Duration(seconds: 2), () {
-            if (mounted) {
-              setState(() {
-                status = '';
-              });
-            }
-          });
         }
+        print('❌ Failed to save voice message to database');
+        HapticFeedback.mediumImpact();
+      } else {
+        print('✅ Voice message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}');
+        HapticFeedback.lightImpact();
+        // Clear status after delay
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) {
+            setState(() {
+              status = '';
+            });
+          }
+        });
+      }
 
-        // Delete temporary file
+      // Delete temporary file after a delay (to ensure upload completed)
+      Future.delayed(const Duration(seconds: 5), () async {
         try {
           if (await audioFile.exists()) {
             await audioFile.delete();
+            print('🗑️ Deleted temporary voice file: $audioPath');
           }
-        } catch (_) {}
-      } else {
-        print('❌ Voice message upload failed: ${uploadResult?['error']}');
-        setState(() {
-          status = 'Upload failed. Please check your connection and try again.';
-          _isUploading = false;
-        });
-        HapticFeedback.mediumImpact();
-      }
+        } catch (e) {
+          print('⚠️ Error deleting temp file: $e');
+        }
+      });
     } catch (e) {
       print('❌ Error sending voice message: $e');
       setState(() {
@@ -1507,19 +1492,15 @@ class _ChannelPageState extends State<ChannelPage> {
   }
 
   /// Format duration for display
-  String _formatDuration(Duration duration) {
-    final minutes = duration.inMinutes;
-    final seconds = duration.inSeconds % 60;
-    if (minutes > 0) {
-      return '${minutes.toString()}:${seconds.toString().padLeft(2, '0')}';
-    } else {
-      return '0:${seconds.toString().padLeft(2, '0')}';
-    }
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes;
+    final seconds = d.inSeconds % 60;
+    return minutes > 0 ? '$minutes:${seconds.toString().padLeft(2, '0')}' : '0:${seconds.toString().padLeft(2, '0')}';
   }
 
   /// Format duration for short display (e.g., "1:23" or "0:45")
-  String _formatShortDuration(Duration duration) {
-    final totalSeconds = duration.inSeconds;
+  String _formatShortDuration(Duration d) {
+    final totalSeconds = d.inSeconds;
     final minutes = totalSeconds ~/ 60;
     final seconds = totalSeconds % 60;
     return '${minutes}:${seconds.toString().padLeft(2, '0')}';
@@ -1527,94 +1508,24 @@ class _ChannelPageState extends State<ChannelPage> {
 
   /// Shows image in full screen viewer
   Future<void> _showFullScreenImage(String cid, String fileName) async {
-    try {
-      // Check cache first
-      Uint8List? imageBytes;
-
-      if (_fileCache.containsKey(cid) && _fileCache[cid] != null) {
-        // Use cached image
-        imageBytes = _fileCache[cid]!;
-        print('✅ [FullScreen] Using cached image: $cid');
-      } else {
-        // Download if not cached
-        setState(() {
-          status = 'Loading image...';
-        });
-        imageBytes = await _getCachedFile(cid);
-      }
-
-      if (imageBytes != null && mounted) {
-        setState(() {
-          status = '';
-        });
-
-        // Show full screen image viewer
-        Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (context) => _FullScreenImageViewer(
-              imageBytes: imageBytes!,
-              fileName: fileName,
-            ),
-            fullscreenDialog: true,
-          ),
-        );
-      } else {
-        setState(() {
-          status = 'Failed to load image';
-        });
-      }
-    } catch (e) {
-      setState(() {
-        status = 'Error loading image: $e';
-      });
+    final bytes = await _getCachedFile(cid);
+    if (bytes != null && mounted) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => _FullScreenImageViewer(imageBytes: bytes, fileName: fileName),
+          fullscreenDialog: true,
+        ),
+      );
     }
   }
 
   Future<void> downloadAndOpenFile(String cid, String fileName) async {
-    try {
-      // Check cache first
-      Uint8List? fileBytes;
-
-      if (_fileCache.containsKey(cid) && _fileCache[cid] != null) {
-        // Use cached file
-        fileBytes = _fileCache[cid]!;
-        print('✅ [Download] Using cached file: $cid');
-        setState(() {
-          status = 'Opening file...';
-        });
-      } else {
-        // Download if not cached
-      setState(() {
-        status = 'Downloading file...';
-      });
-        fileBytes = await _getCachedFile(cid);
-      }
-      
-      if (fileBytes != null) {
+    final bytes = await _getCachedFile(cid);
+    if (bytes != null) {
       final dir = await getTemporaryDirectory();
-      final filePath = '${dir.path}/$fileName';
-
-        // Write file to local storage
-        final file = File(filePath);
-        await file.writeAsBytes(fileBytes);
-
-      setState(() {
-        status = 'File downloaded. Opening...';
-      });
-        
-      await OpenFile.open(filePath);
-      setState(() {
-        status = '';
-      });
-      } else {
-        setState(() {
-          status = 'Failed to download file from server';
-        });
-      }
-    } catch (e) {
-      setState(() {
-        status = 'Error downloading/opening file: $e';
-      });
+      final path = '${dir.path}/$fileName';
+      await File(path).writeAsBytes(bytes);
+      await OpenFile.open(path);
     }
   }
 
@@ -2389,30 +2300,9 @@ class _ChannelPageState extends State<ChannelPage> {
   }
 
   Future<void> _showChannelInfo() async {
-    if (_inviterAddress == null) {
-      _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-          widget.workspaceName);
-    }
-
-    if (_inviterAddress == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not load channel information'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-
-    // Ensure user address is loaded
-    if (userAddress == null) {
-      await _loadUserAddress();
-    }
-
-    final members = await OrbitDBService.getWorkspaceMembers(
-      inviterAddress: _inviterAddress!,
-      workspaceName: widget.workspaceName,
-    );
+    // Use MongoDB members
+    final members = await DistributedService.getWorkspaceMembers(widget.workspaceName);
+    String? inviterAddress = null; // Not needed for MongoDB lookup usually
 
     // Ensure current logged-in user is in the members list
     if (userAddress != null) {
@@ -2422,12 +2312,12 @@ class _ChannelPageState extends State<ChannelPage> {
 
       if (!userExists) {
         // Get current user's display name
-        final userDisplayName = await _getUserNameFromOrbitDB();
+        final userDisplayName = await _getUserNameFromMongoDB();
         
         members.add({
           'type': 'member',
           'workspaceName': widget.workspaceName,
-          'inviterAddress': _inviterAddress!,
+          'inviterAddress': inviterAddress ?? '',
           'memberAddress': userKey,
           'memberDisplayName': userDisplayName,
           'joinedAt': DateTime.now().millisecondsSinceEpoch,
@@ -2677,78 +2567,62 @@ class _ChannelPageState extends State<ChannelPage> {
       {required bool isSent}) {
     final timestamp = _formatTimestamp(message['timestamp']);
 
-    // Priority: If type is explicitly set, use it. Otherwise, infer from extension.
+    // Priority: If type is explicitly set, use it. Otherwise, infer from extension or content.
     // If type is 'file', always treat as file regardless of extension
-    final messageType = message['type']?.toString();
-    final isFile = messageType == 'file';
-    final isImage = !isFile &&
-        (messageType == 'image' ||
-            (message['fileName'] != null &&
-                (message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.jpg') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.jpeg') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.png') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.gif') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.webp'))));
-    final isVideo = !isFile &&
-        !isImage &&
-        (messageType == 'video' ||
-            (message['fileName'] != null &&
-                (message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.mp4') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.mov') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.avi') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.mkv') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.webm') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.3gp') ||
-                    message['fileName']
-                        .toString()
-                        .toLowerCase()
-                        .endsWith('.m4v'))));
-    final isAudio = messageType == 'audio' ||
-        (message['fileName'] != null &&
-            (message['fileName'].toString().toLowerCase().endsWith('.m4a') ||
-                message['fileName'].toString().toLowerCase().endsWith('.mp3') ||
-                message['fileName'].toString().toLowerCase().endsWith('.wav') ||
-                message['fileName'].toString().toLowerCase().endsWith('.aac')));
+    final messageType = message['type']?.toString()?.toLowerCase() ?? '';
+    final fileName = message['fileName']?.toString() ?? '';
+    final content = (message['content']?.toString() ?? '').toLowerCase();
+    final cid = message['cid']?.toString() ?? 
+                message['fileCid']?.toString() ?? 
+                message['fileId']?.toString() ?? 
+                '';
+    
+    // Detect type from messageType, fileName, or content
+    String detectedType = messageType;
+    if (detectedType.isEmpty || detectedType == 'text') {
+      // Try to detect from content
+      if (content.contains('voice message') || content.contains('audio')) {
+        detectedType = 'audio';
+      } else if (content.contains('image:') || content.contains('photo')) {
+        detectedType = 'image';
+      } else if (content.contains('video:')) {
+        detectedType = 'video';
+      } else if (content.contains('file:')) {
+        detectedType = 'file';
+      } else if (fileName.isNotEmpty) {
+        // Detect from file extension
+        final lowerFileName = fileName.toLowerCase();
+        if (lowerFileName.endsWith('.m4a') || lowerFileName.endsWith('.mp3') || 
+            lowerFileName.endsWith('.wav') || lowerFileName.endsWith('.aac')) {
+          detectedType = 'audio';
+        } else if (lowerFileName.endsWith('.jpg') || lowerFileName.endsWith('.jpeg') || 
+                   lowerFileName.endsWith('.png') || lowerFileName.endsWith('.gif') || 
+                   lowerFileName.endsWith('.webp')) {
+          detectedType = 'image';
+        } else if (lowerFileName.endsWith('.mp4') || lowerFileName.endsWith('.mov') || 
+                   lowerFileName.endsWith('.avi') || lowerFileName.endsWith('.mkv') || 
+                   lowerFileName.endsWith('.webm') || lowerFileName.endsWith('.3gp') || 
+                   lowerFileName.endsWith('.m4v')) {
+          detectedType = 'video';
+        } else if (cid.isNotEmpty) {
+          detectedType = 'file';
+        }
+      } else if (cid.isNotEmpty) {
+        detectedType = 'file';
+      }
+    }
+    
+    final isFile = detectedType == 'file';
+    final isImage = detectedType == 'image';
+    final isVideo = detectedType == 'video';
+    final isAudio = detectedType == 'audio';
 
-    // Fallback: if no type is set and it has cid, treat as file
+    // Fallback: if no type is set and it has cid/fileId, treat as file
     final isFileFallback = !isFile &&
         !isImage &&
         !isVideo &&
         !isAudio &&
-        (message['fileName'] != null && message['cid'] != null);
+        cid.isNotEmpty;
 
     if (isSent) {
       // Sent message (right aligned)
@@ -2763,7 +2637,7 @@ class _ChannelPageState extends State<ChannelPage> {
               GestureDetector(
                 onTap: () {
                   _showFullScreenImage(
-                    message['cid'] ?? message['fileCid'],
+                    message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '',
                     message['fileName'] ?? 'image.jpg',
                   );
                 },
@@ -2871,7 +2745,7 @@ class _ChannelPageState extends State<ChannelPage> {
               GestureDetector(
                 onTap: () {
                   downloadAndOpenFile(
-                    message['cid'] ?? message['fileCid'],
+                    message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '',
                     message['fileName'] ?? 'video.mp4',
                   );
                 },
@@ -2952,7 +2826,7 @@ class _ChannelPageState extends State<ChannelPage> {
             else if (isAudio)
               GestureDetector(
                 onTap: () {
-                  final audioId = message['cid'] ?? message['fileCid'] ?? '';
+                  final audioId = message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '';
                   _playAudio(audioId, audioId);
                 },
                 child: Container(
@@ -2983,7 +2857,7 @@ class _ChannelPageState extends State<ChannelPage> {
                               children: [
                                 Icon(
                                   _playingAudioId ==
-                                          (message['cid'] ?? message['fileCid'])
+                                          (message['cid'] ?? message['fileCid'] ?? message['fileId'])
                                       ? Icons.pause_circle_filled
                                       : Icons.play_circle_filled,
                                   color: const Color(0xFF0F365F),
@@ -3005,7 +2879,8 @@ class _ChannelPageState extends State<ChannelPage> {
                     Text(
                                       _playingAudioId ==
                                               (message['cid'] ??
-                                                  message['fileCid'])
+                                                  message['fileCid'] ??
+                                                  message['fileId'])
                                           ? '${_formatShortDuration(_audioPosition)} / ${_formatShortDuration(_audioDuration.inMilliseconds > 0 ? _audioDuration : Duration(seconds: message['duration'] ?? 0))}'
                                           : (message['duration'] != null
                                               ? _formatShortDuration(Duration(
@@ -3043,7 +2918,7 @@ class _ChannelPageState extends State<ChannelPage> {
                         ),
                         // Progress bar for playing audio
                         if (_playingAudioId ==
-                                (message['cid'] ?? message['fileCid']) &&
+                                (message['cid'] ?? message['fileCid'] ?? message['fileId']) &&
                             _audioDuration.inMilliseconds > 0)
                           Padding(
                             padding: const EdgeInsets.only(top: 8),
@@ -3199,7 +3074,7 @@ class _ChannelPageState extends State<ChannelPage> {
                   ? GestureDetector(
                       onTap: () {
                         _showFullScreenImage(
-                          message['cid'] ?? message['fileCid'],
+                          message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '',
                           message['fileName'] ?? 'image.jpg',
                         );
                           },
@@ -3229,7 +3104,7 @@ class _ChannelPageState extends State<ChannelPage> {
                               Builder(
                                 builder: (context) {
                                   final cid =
-                                      message['cid'] ?? message['fileCid'];
+                                      message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '';
 
                                   // If cached, show immediately without FutureBuilder
                                   if (_fileCache.containsKey(cid) &&
@@ -3299,7 +3174,7 @@ class _ChannelPageState extends State<ChannelPage> {
                       ? GestureDetector(
                           onTap: () {
                             downloadAndOpenFile(
-                              message['cid'] ?? message['fileCid'],
+                              message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '',
                               message['fileName'] ?? 'video.mp4',
                             );
                           },
@@ -3372,7 +3247,7 @@ class _ChannelPageState extends State<ChannelPage> {
                           ? GestureDetector(
                               onTap: () {
                                 final audioId =
-                                    message['cid'] ?? message['fileCid'] ?? '';
+                                    message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '';
                                 _playAudio(audioId, audioId);
                               },
                               child: Container(
@@ -3408,7 +3283,8 @@ class _ChannelPageState extends State<ChannelPage> {
                                               Icon(
                                                 _playingAudioId ==
                                                         (message['cid'] ??
-                                                            message['fileCid'])
+                                                            message['fileCid'] ??
+                                                            message['fileId'])
                                                     ? Icons.pause_circle_filled
                                                     : Icons.play_circle_filled,
                                                 color: const Color(0xFF0F365F),
@@ -3433,7 +3309,8 @@ class _ChannelPageState extends State<ChannelPage> {
                                                     _playingAudioId ==
                                                             (message['cid'] ??
                                                                 message[
-                                                                    'fileCid'])
+                                                                    'fileCid'] ??
+                                                                message['fileId'])
                                                         ? '${_formatShortDuration(_audioPosition)} / ${_formatShortDuration(_audioDuration.inMilliseconds > 0 ? _audioDuration : Duration(seconds: message['duration'] ?? 0))}'
                                                         : (message['duration'] !=
                                                                 null
@@ -3472,7 +3349,8 @@ class _ChannelPageState extends State<ChannelPage> {
                                       // Progress bar for playing audio
                                       if (_playingAudioId ==
                                               (message['cid'] ??
-                                                  message['fileCid']) &&
+                                                  message['fileCid'] ??
+                                                  message['fileId']) &&
                                           _audioDuration.inMilliseconds > 0)
                                         Padding(
                                           padding:
@@ -3502,7 +3380,7 @@ class _ChannelPageState extends State<ChannelPage> {
                               onTap: (isFile || isFileFallback)
                                   ? () {
                                       downloadAndOpenFile(
-                                        message['cid'] ?? message['fileCid'],
+                                        message['cid'] ?? message['fileCid'] ?? message['fileId'] ?? '',
                                         message['fileName'] ?? 'file',
                                       );
                                     }
@@ -3611,9 +3489,22 @@ class _ChannelPageState extends State<ChannelPage> {
     }
   }
 
-  String _formatTimestamp(DateTime timestamp) {
-    final hour = timestamp.hour;
-    final minute = timestamp.minute;
+  String _formatTimestamp(dynamic timestamp) {
+    // Handle both DateTime and int (milliseconds since epoch)
+    DateTime dateTime;
+    if (timestamp is DateTime) {
+      dateTime = timestamp;
+    } else if (timestamp is int) {
+      dateTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    } else if (timestamp is String) {
+      dateTime = DateTime.tryParse(timestamp) ?? DateTime.now();
+    } else {
+      // Fallback to current time
+      dateTime = DateTime.now();
+    }
+    
+    final hour = dateTime.hour;
+    final minute = dateTime.minute;
     final period = hour >= 12 ? 'PM' : 'AM';
     final displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
     return '${displayHour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')} $period';
@@ -3709,15 +3600,11 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
 
     try {
       // Load inviter address
-      _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-          widget.workspaceName);
-
-      if (_inviterAddress != null) {
-        // Load members
-        final members = await OrbitDBService.getWorkspaceMembers(
-          inviterAddress: _inviterAddress!,
-          workspaceName: widget.workspaceName,
-        );
+      // Load members from MongoDB
+      final members = await DistributedService.getWorkspaceMembers(widget.workspaceName);
+      
+      if (true) { // Flatten logic structure to minimize diff churn
+         _inviterAddress = null; // Not strictly needed for basic member list
 
         // Ensure current user is in the list
         if (widget.userAddress != null) {
@@ -3785,8 +3672,8 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
 
   Future<void> _loadChannelContent() async {
     try {
-      final messages = await OrbitDBService.getChannelMessages(
-          widget.workspaceName, widget.channelName);
+      final messages = await DistributedService.getChannelMessages(
+          workspaceId: widget.workspaceName, channelId: widget.channelName);
 
       // Parse timestamps
       for (var msg in messages) {
@@ -3851,19 +3738,8 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
   Future<String?> _getUserNameFromOrbitDB() async {
     try {
       if (widget.userAddress == null) return null;
-      final key = widget.userAddress!.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      if (dbAddress != null) {
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        for (var message in messages) {
-          if (message['type'] == 'profile' &&
-              message['userAddress'] == key) {
-            return message['username'];
-          }
-        }
-      }
-      return null;
+      final profile = await DistributedService.getUserProfile(widget.userAddress!);
+      return profile?['username'];
     } catch (e) {
       return null;
     }
@@ -3871,22 +3747,10 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
 
   Future<String?> _getProfileNameForAddress(String address) async {
     try {
-      final key = address.toLowerCase().trim();
-      final dbName = 'profile_$key';
-      var dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      if (dbAddress == null) {
-        dbAddress = await OrbitDBService.createChatDB(dbName);
-        if (dbAddress == null) return null;
-      }
-      final messages = await OrbitDBService.getMessages(dbAddress);
-      for (var message in messages) {
-        if (message['type'] == 'profile' &&
-            message['userAddress']?.toString().toLowerCase() == key) {
-          return message['username']?.toString();
-        }
-      }
-      return null;
+      final profile = await DistributedService.getUserProfile(address);
+      return profile?['username'];
     } catch (e) {
+      debugPrint('Error getting profile name: $e');
       return null;
     }
   }
@@ -4027,8 +3891,8 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       
       // Get inviter address if not already loaded
       if (_inviterAddress == null) {
-        _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-            widget.workspaceName);
+        // Stub: Inviter address not strictly needed for basic rename in MongoDB
+        _inviterAddress = null;
       }
       
       if (_inviterAddress == null) {
@@ -4069,26 +3933,14 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       // 2. Update channel message in workspace database
       // Since OrbitDB is append-only, we add a new channel message with updated name
       // The latest channel message with this workspaceName will be used
-      final workspaceDbName = 'workspace_$_inviterAddress';
-      final workspaceDbAddress = await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
-      
-      if (workspaceDbAddress != null) {
-        // Add updated channel message (this will be the latest one)
-        final updatedChannelMessage = {
-          'type': 'channel',
-          'workspaceName': widget.workspaceName,
-          'channelName': newName, // New name
-          'originalChannelName': originalDbName, // Keep original for DB operations
-          'createdBy': widget.userAddress?.toLowerCase().trim() ?? '',
-          'inviterAddress': _inviterAddress,
-          'updatedAt': DateTime.now().millisecondsSinceEpoch,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        };
-        
-        final channelUpdateSuccess = await OrbitDBService.addMessage(
-          workspaceDbAddress,
-          updatedChannelMessage,
-        );
+        // Add updated channel message to MongoDB (as a system message or metadata)
+        final channelUpdateSuccess = await DistributedService.addMessage(
+          workspaceId: widget.workspaceName,
+          channelId: 'general', // Use general channel for workspace updates
+          senderAddress: widget.userAddress ?? '',
+          messageText: 'Channel renamed: $originalDbName -> $newName',
+          // metadata: updatedChannelMessage, // TODO: Add metadata support
+        ) != null;
         
         if (channelUpdateSuccess == null) {
           print('⚠️ Warning: Could not update channel message in workspace database');
@@ -4107,8 +3959,9 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
           'timestamp': DateTime.now().millisecondsSinceEpoch,
         };
         
-        await OrbitDBService.addMessage(workspaceDbAddress, renameMessage);
-      }
+        // Stub: Detailed rename tracking in MongoDB
+        // await MongoDBService.addMessage(...); // Implement if needed
+        print('⚠️ MongoDB: Rename tracking stub called');
       
       // 3. Store channel metadata in channel's message database (using original DB name)
       final channelMetadata = {
@@ -4123,11 +3976,14 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       };
       
       // Add metadata message to channel (using original DB name for database)
-      final channelMetadataSuccess = await OrbitDBService.addChannelMessage(
-        widget.workspaceName,
-        originalDbName, // Always use original DB name
-        channelMetadata,
-      );
+      // Add metadata message to channel
+      final channelMetadataSuccess = await DistributedService.addMessage(
+        workspaceId: widget.workspaceName,
+        channelId: originalDbName,
+        senderAddress: widget.userAddress ?? '',
+        messageText: 'Channel renamed to $newName',
+        // metadata: channelMetadata, // TODO: Add metadata support to addMessage
+      ) != null;
       
       if (channelMetadataSuccess) {
         // State is already updated above, just set loading to false
@@ -4400,8 +4256,8 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       
       // Get inviter address if not already loaded
       if (_inviterAddress == null) {
-        _inviterAddress = await OrbitDBService.getInviterAddressForWorkspace(
-            widget.workspaceName);
+        // Stub: Inviter not needed for MongoDB ops usually, or fetch from workspace metadata
+        _inviterAddress = null;
       }
       
       if (_inviterAddress == null) {
@@ -4414,31 +4270,18 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       
       print('🗑️ [DeleteChannel] Deleting channel: "$originalDbName" (display: "$displayName")');
       
-      // 1. Add channel_delete message to workspace database
-      final workspaceDbName = 'workspace_$_inviterAddress';
-      final workspaceDbAddress = await OrbitDBService.getExistingDatabaseAddress(workspaceDbName);
+      // 1. Add channel_delete message to workspace
+      final deleteSuccess = await DistributedService.addMessage(
+          workspaceId: widget.workspaceName,
+          channelId: 'general', // Use general channel or system channel for workspace-level events
+          senderAddress: widget.userAddress ?? '',
+          messageText: 'Channel deleted: $displayName (ID: $originalDbName)',
+      ) != null;
       
-      if (workspaceDbAddress != null) {
-        final deleteMessage = {
-          'type': 'channel_delete',
-          'workspaceName': widget.workspaceName,
-          'channelName': originalDbName, // Original database name
-          'deletedChannelName': displayName, // Display name for reference
-          'deletedBy': widget.userAddress?.toLowerCase().trim() ?? '',
-          'inviterAddress': _inviterAddress,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        };
-        
-        final deleteSuccess = await OrbitDBService.addMessage(
-          workspaceDbAddress,
-          deleteMessage,
-        );
-        
-        if (deleteSuccess == null) {
-          print('⚠️ Warning: Could not add delete message to workspace database');
-        } else {
-          print('✅ Delete message added to workspace database');
-        }
+      if (!deleteSuccess) {
+        print('⚠️ Warning: Could not add delete message to workspace database');
+      } else {
+        print('✅ Delete message added to workspace database');
       }
       
       // 2. Clean up SharedPreferences mappings
@@ -4499,10 +4342,12 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       };
       
       // Add metadata message to channel (using original DB name)
-      await OrbitDBService.addChannelMessage(
-        widget.workspaceName,
-        originalDbName,
-        channelMetadata,
+      // Add metadata message to channel (using original DB name)
+      await DistributedService.addMessage(
+        workspaceId: widget.workspaceName,
+        channelId: originalDbName,
+        senderAddress: widget.userAddress ?? '',
+        messageText: 'Channel deleted: $displayName',
       );
       
       setState(() {
@@ -4524,7 +4369,7 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
         Navigator.pop(context, {'deleted': true, 'channelName': originalDbName});
       }
     } catch (e) {
-      print('❌ Error deleting channel: $e');
+      debugPrint('❌ Error deleting channel: $e');
       setState(() {
         _isLoading = false;
       });
@@ -5159,7 +5004,7 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
           children: [
             if (cid != null)
               FutureBuilder<Uint8List?>(
-                future: OrbitDBService.downloadFile(cid),
+                future: Future.value(null), // OrbitDBService.downloadFile(cid) stubbed
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Center(
@@ -5540,7 +5385,9 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
 
   Future<void> _showFullScreenImage(String cid, String fileName) async {
     try {
-      final imageBytes = await OrbitDBService.downloadFile(cid);
+      // Stub: Download
+      print('⚠️ MongoDB: Download stub called for: $cid');
+      final Uint8List? imageBytes = null;
       if (imageBytes != null && mounted) {
         Navigator.of(context).push(
           MaterialPageRoute(
@@ -5559,7 +5406,9 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
 
   Future<void> _downloadAndOpenFile(String cid, String fileName) async {
     try {
-      final fileBytes = await OrbitDBService.downloadFile(cid);
+      // Stub: Download
+      print('⚠️ MongoDB: Download stub called for: $cid');
+      final Uint8List? fileBytes = null;
       if (fileBytes != null) {
         final dir = await getTemporaryDirectory();
         final filePath = '${dir.path}/$fileName';
@@ -5676,7 +5525,8 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       ),
     );
   }
-}
+  }
+
 
 /// Full Screen Image Viewer Widget
 class _FullScreenImageViewer extends StatelessWidget {

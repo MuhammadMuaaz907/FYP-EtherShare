@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:email_validator/email_validator.dart';
@@ -12,7 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'invite_link_manager.dart';
-import 'orbitdb_service.dart';
+import 'distributed_service.dart';
 
 /// Centralised utility for creating and sharing workspace invitations.
 ///
@@ -35,7 +34,17 @@ class InviteService {
         ? 'unknown'
         : inviterAddress.trim().toLowerCase();
 
-    return '$_webInviteBase?workspace=$slug&inviter=$inviter';
+    // Properly encode URL parameters
+    final encodedSlug = Uri.encodeComponent(slug);
+    final encodedInviter = Uri.encodeComponent(inviter);
+
+    final link = '$_webInviteBase?workspace=$encodedSlug&inviter=$encodedInviter';
+    
+    debugPrint('🔗 Generated invite link: $link');
+    debugPrint('   Workspace: $workspaceName -> Slug: $slug');
+    debugPrint('   Inviter: $inviterAddress');
+    
+    return link;
   }
 
   /// Builds the custom scheme fallback link for legacy contexts.
@@ -48,7 +57,11 @@ class InviteService {
         ? 'unknown'
         : inviterAddress.trim().toLowerCase();
 
-    return '$_deepLinkScheme://$_deepLinkHost?workspace=$slug&inviter=$inviter';
+    // Properly encode URL parameters
+    final encodedSlug = Uri.encodeComponent(slug);
+    final encodedInviter = Uri.encodeComponent(inviter);
+
+    return '$_deepLinkScheme://$_deepLinkHost?workspace=$encodedSlug&inviter=$encodedInviter';
   }
 
   /// Shares an invitation using the native share sheet.
@@ -468,129 +481,146 @@ If you weren't expecting this invitation, you can safely ignore this email.
 '''.trim();
   }
 
+  /// Resolves an invite link by fetching workspace details from MongoDB
+  /// Returns ResolvedInvite if workspace found, null otherwise
   static Future<ResolvedInvite?> resolveInvite(InviteLinkData data) async {
     try {
-      final inviterKey = data.inviterAddress.toLowerCase().trim();
-      if (inviterKey.isEmpty) {
+      debugPrint('🔍 Resolving invite:');
+      debugPrint('   Workspace Slug: ${data.workspaceSlug}');
+      debugPrint('   Inviter Address: ${data.inviterAddress}');
+      
+      // Normalize slug and inviter address
+      final normalizedSlug = data.workspaceSlug.trim().toLowerCase();
+      final normalizedInviter = data.inviterAddress.trim().toLowerCase();
+      
+      // Resolve workspace by slug and inviter address
+      final workspace = await DistributedService.resolveWorkspaceBySlug(
+        workspaceSlug: normalizedSlug,
+        inviterAddress: normalizedInviter,
+      );
+      
+      if (workspace == null) {
+        debugPrint('❌ Workspace not found for invite link');
+        debugPrint('   Searched for slug: $normalizedSlug');
+        debugPrint('   With inviter: $normalizedInviter');
+        debugPrint('💡 Possible issues:');
+        debugPrint('   1. Workspace does not exist');
+        debugPrint('   2. Inviter address mismatch');
+        debugPrint('   3. Slug generation mismatch');
         return null;
       }
-
-      final dbName = 'workspace_$inviterKey';
-      final dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      if (dbAddress == null) {
+      
+      final workspaceName = workspace['name']?.toString() ?? '';
+      final workspaceId = workspace['workspace_id']?.toString() ?? '';
+      
+      if (workspaceName.isEmpty || workspaceId.isEmpty) {
+        debugPrint('❌ Invalid workspace data returned from backend');
+        debugPrint('   Workspace name: $workspaceName');
+        debugPrint('   Workspace ID: $workspaceId');
         return null;
       }
-
-      final messages = await OrbitDBService.getMessages(dbAddress);
-      String? workspaceName;
-      String? channelName;
-
-      for (final Map<String, dynamic> map
-          in messages.reversed.cast<Map<String, dynamic>>()) {
-        final type = map['type']?.toString();
-        final owner = map['userAddress']?.toString().toLowerCase();
-        if (type == 'workspace' && owner == inviterKey) {
-          final details = map['workspaceDetails'];
-          Map<String, dynamic>? parsed;
-          if (details is String) {
-            try {
-              parsed = jsonDecode(details) as Map<String, dynamic>;
-            } catch (_) {
-              parsed = null;
-            }
-          } else if (details is Map) {
-            parsed = Map<String, dynamic>.from(details);
-          }
-
-          workspaceName = parsed?['workspaceName'] as String?;
-          channelName = parsed?['channelName'] as String?;
-          break;
-        }
+      
+      // Generate slug from workspace name to verify match
+      final expectedSlug = _workspaceSlug(workspaceName).toLowerCase();
+      final providedSlug = normalizedSlug;
+      final slugMatches = expectedSlug == providedSlug;
+      
+      if (!slugMatches) {
+        debugPrint('⚠️ Slug mismatch detected:');
+        debugPrint('   Expected slug (from workspace name): $expectedSlug');
+        debugPrint('   Provided slug (from link): $providedSlug');
+        debugPrint('   Workspace name: $workspaceName');
+        // Still proceed, but log the mismatch
       }
-
-      final derivedName =
-          workspaceName ?? _beautifySlug(data.workspaceSlug);
-      final derivedChannel = channelName ?? 'general';
-      final computedSlug = _workspaceSlug(derivedName);
-
+      
+      debugPrint('✅ Workspace resolved successfully:');
+      debugPrint('   Workspace Name: $workspaceName');
+      debugPrint('   Workspace ID: $workspaceId');
+      debugPrint('   Slug Match: $slugMatches');
+      
       return ResolvedInvite(
         linkData: data,
-        workspaceName: derivedName,
-        channelName: derivedChannel,
-        slugMatchesWorkspace: computedSlug == data.workspaceSlug,
+        workspaceName: workspaceName,
+        channelName: 'general', // Default channel
+        slugMatchesWorkspace: slugMatches,
       );
-    } catch (error) {
-      debugPrint('InviteService.resolveInvite error: $error');
+    } catch (e, stackTrace) {
+      debugPrint('❌ Error resolving invite: $e');
+      debugPrint('   Stack trace: $stackTrace');
       return null;
     }
   }
 
+  /// Applies an invite by adding the user to the workspace in MongoDB
+  /// Returns true if successful, false otherwise
   static Future<bool> applyInviteForUser({
     required ResolvedInvite invite,
     required String inviteeAddress,
   }) async {
-    final key = inviteeAddress.toLowerCase().trim();
-    if (key.isEmpty) {
-      return false;
-    }
-
-    final workspaceDetails = jsonEncode({
-      'workspaceName': invite.workspaceName,
-      'channelName': invite.channelName,
-    });
-
-    // Save workspace for the user
-    final saved = await OrbitDBService.saveWorkspaceForUser(key, workspaceDetails);
-    if (!saved) {
-      return false;
-    }
-
-    // Get invitee's display name from profile
-    String? memberDisplayName;
     try {
-      final profileDbName = 'profile_$key';
-      final profileDbAddress = await OrbitDBService.getExistingDatabaseAddress(profileDbName);
-      if (profileDbAddress != null) {
-        final profileMessages = await OrbitDBService.getMessages(profileDbAddress);
-        for (var msg in profileMessages) {
-          if (msg['type'] == 'profile' && msg['userAddress']?.toString().toLowerCase() == key) {
-            memberDisplayName = msg['username']?.toString();
-            break;
-          }
-        }
+      debugPrint('📝 Applying invite for user: $inviteeAddress');
+      debugPrint('   Workspace: ${invite.workspaceName}');
+      debugPrint('   Inviter: ${invite.linkData.inviterAddress}');
+      
+      // First, resolve workspace to get workspace_id
+      final workspace = await DistributedService.resolveWorkspaceBySlug(
+        workspaceSlug: invite.linkData.workspaceSlug,
+        inviterAddress: invite.linkData.inviterAddress,
+      );
+      
+      if (workspace == null) {
+        debugPrint('❌ Cannot apply invite: workspace not found');
+        return false;
       }
+      
+      final workspaceId = workspace['workspace_id']?.toString() ?? '';
+      if (workspaceId.isEmpty) {
+        debugPrint('❌ Invalid workspace ID');
+        return false;
+      }
+      
+      // Check if user is already a member
+      final existingMembers = await DistributedService.getWorkspaceMembers(workspaceId);
+      final isAlreadyMember = existingMembers.any(
+        (member) => (member['memberAddress']?.toString() ?? '').toLowerCase() == inviteeAddress.toLowerCase(),
+      );
+      
+      if (isAlreadyMember) {
+        debugPrint('ℹ️ User is already a member of this workspace');
+        return true; // Already a member, consider it successful
+      }
+      
+      // Get user's display name from profile
+      String? displayName;
+      try {
+        final profile = await DistributedService.getUserProfile(inviteeAddress);
+        if (profile != null) {
+          displayName = profile['username']?.toString();
+        }
+      } catch (e) {
+        debugPrint('⚠️ Could not fetch user profile: $e');
+      }
+      
+      // Add user as workspace member
+      final success = await DistributedService.addWorkspaceMember(
+        workspaceId: workspaceId,
+        memberAddress: inviteeAddress,
+        displayName: displayName,
+      );
+      
+      if (success) {
+        debugPrint('✅ User successfully added to workspace: $workspaceId');
+      } else {
+        debugPrint('❌ Failed to add user to workspace');
+      }
+      
+      return success;
     } catch (e) {
-      debugPrint('⚠️ Could not fetch invitee profile for display name: $e');
+      debugPrint('❌ Error applying invite: $e');
+      return false;
     }
-
-    // Add the invitee as a member to the workspace
-    final inviterAddress = invite.linkData.inviterAddress.toLowerCase().trim();
-    final memberAdded = await OrbitDBService.addWorkspaceMember(
-      inviterAddress: inviterAddress,
-      memberAddress: key,
-      workspaceName: invite.workspaceName,
-      memberDisplayName: memberDisplayName,
-    );
-
-    if (!memberAdded) {
-      debugPrint('⚠️ Failed to add member to workspace, but workspace was saved');
-      // Still return true since workspace was saved successfully
-    }
-
-    return true;
   }
 
-  static String _beautifySlug(String slug) {
-    return slug
-        .replaceAll('-', ' ')
-        .replaceAll('_', ' ')
-        .split(' ')
-        .where((part) => part.isNotEmpty)
-        .map((part) =>
-            '${part[0].toUpperCase()}${part.length > 1 ? part.substring(1) : ''}')
-        .join(' ')
-        .trim();
-  }
 }
 
 /// High-level status for invite sharing.

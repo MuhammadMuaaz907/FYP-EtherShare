@@ -4,8 +4,8 @@ import 'package:http/http.dart';
 import 'package:web3dart/web3dart.dart';
 import 'package:hex/hex.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import './orbitdb_service.dart';
 import 'two_fa_error_handler.dart';
+import 'distributed_service.dart';
 
 /// Enhanced Contract Service with 2FA Support
 /// 
@@ -17,7 +17,7 @@ import 'two_fa_error_handler.dart';
 /// - Gas estimation and transaction optimization
 /// - Integration with existing blockchain operations
 class ContractService {
-  final String _rpcUrl = 'https://eddf93d8e0a7.ngrok-free.app';
+  final String _rpcUrl = 'https://95cb0874ae19.ngrok-free.app';
   final String _contractAddress = '0x15D9fDF2c6514047A2FFa4B8eD0fa87BB069a0Cd'; // Updated contract with 2FA functions
   late Web3Client _client;
   late DeployedContract _contract;
@@ -297,91 +297,56 @@ class ContractService {
 
   Future<bool> doesWorkspaceExist(String address) async {
     try {
-      final key = address.toLowerCase().trim();
-      // Create workspace database name for this user
-      final dbName = 'workspace_$key';
-      
-      // First try to get existing database
-      String? dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      
-      if (dbAddress != null) {
-        print('🔍 Checking workspace in database: $dbAddress');
-        // Get messages from the workspace database
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        print('📨 Retrieved ${messages.length} messages from workspace database');
-        
-        // Check if there's a workspace message for this user
-        for (var message in messages) {
-          print('🔍 Checking message: ${message['type']} for user: ${message['userAddress']}');
-          if (message['type'] == 'workspace' && message['userAddress'] == key) {
-            print('📋 Found workspace data: ${message['workspaceDetails']}');
-            print('✅ Workspace found for user: $key');
-            return true;
-          }
-        }
-      } else {
-        print('❌ Workspace database not found for user: $key');
-      }
-      
-      print('❌ No workspace found for user: $key');
-      return false;
+      // Add timeout wrapper for faster failure
+      final workspaces = await DistributedService.getUserWorkspaces(address).timeout(
+        const Duration(seconds: 7),
+        onTimeout: () {
+          print('⚠️ Workspace check timeout');
+          return <Map<String, dynamic>>[];
+        },
+      ).catchError((e) {
+        print('⚠️ Error checking workspace existence: ${e.toString().split('\n').first}');
+        return <Map<String, dynamic>>[];
+      });
+      return workspaces.isNotEmpty;
     } catch (e) {
-      print('Error checking workspace existence: $e');
+      print('⚠️ Error checking workspace existence: ${e.toString().split('\n').first}');
       return false;
     }
   }
 
-  // Check if user has completed profile setup - Now uses OrbitDB instead of local storage
+  // Check if user has completed profile setup
   Future<bool> hasCompletedProfile(String address) async {
     try {
-      final key = address.toLowerCase().trim();
-      final dbName = 'profile_$key';
+      // Add timeout wrapper for faster failure
+      final profile = await DistributedService.getUserProfile(address).timeout(
+        const Duration(seconds: 7),
+        onTimeout: () {
+          print('⚠️ Profile check timeout');
+          return null;
+        },
+      ).catchError((e) {
+        print('⚠️ Error checking profile: ${e.toString().split('\n').first}');
+        return null;
+      });
       
-      // First try to get existing database
-      String? dbAddress = await OrbitDBService.getExistingDatabaseAddress(dbName);
-      
-      if (dbAddress != null) {
-        print('🔍 Checking profile in database: $dbAddress');
-        final messages = await OrbitDBService.getMessages(dbAddress);
-        print('📨 Retrieved ${messages.length} messages from profile database');
+      if (profile != null) {
+        final username = profile['username'];
+        final email = profile['email'];
         
-        // Find profile message for this user
-        for (var message in messages) {
-          print('🔍 Checking message: ${message['type']} for user: ${message['userAddress']}');
-          if (message['type'] == 'profile' && message['userAddress'] == key) {
-            final username = message['username'];
-            final email = message['email'];
-            
-            print('📋 Found profile data - Username: $username, Email: $email');
-            
-            if (username != null && username.isNotEmpty && email != null && email.isNotEmpty) {
-              print('✅ Profile completed for user: $address');
-              return true;
-            }
-          }
-        }
-      } else {
-        print('❌ Profile database not found for user: $address');
+        return username != null && username.toString().isNotEmpty && 
+               email != null && email.toString().isNotEmpty;
       }
       
-      print('❌ Profile not completed for user: $address');
       return false;
     } catch (e) {
-      print('Error checking profile completion: $e');
+      print('⚠️ Error checking profile completion: ${e.toString().split('\n').first}');
       return false;
     }
   }
 
-  // Helper method to get existing database
-  Future<String?> _getExistingDatabase(String dbName) async {
-    try {
-      // Use consistent database addressing
-      return await OrbitDBService.getConsistentDatabaseAddress(dbName);
-    } catch (e) {
-      print('Error getting existing database: $e');
-      return null;
-    }
-  }
+
+
 
   // ============ NEW 2FA FUNCTIONS ============
 
