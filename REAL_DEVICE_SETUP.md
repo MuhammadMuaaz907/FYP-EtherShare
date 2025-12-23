@@ -9,7 +9,7 @@ The app was trying to connect to `localhost:3000` on a real Android device, whic
 Updated `DistributedService` to automatically detect the platform and use the correct host:
 
 - **Android Emulator**: `10.0.2.2:3000`
-- **Real Android Device**: `172.22.160.1:3000` (Your PC's IP)
+- **Real Android Device**: `192.168.0.35:3000` (Your PC's IP)
 - **Desktop/Web**: `localhost:3000`
 
 ## 📋 Setup Steps
@@ -28,7 +28,7 @@ ifconfig | grep "inet "
 
 You should see something like:
 ```
-IPv4 Address. . . . . . . . . . . : 172.22.160.1
+IPv4 Address. . . . . . . . . . . : 192.168.0.35
 ```
 
 ### 2. Update DistributedService (if needed)
@@ -36,7 +36,7 @@ IPv4 Address. . . . . . . . . . . : 172.22.160.1
 If your PC IP is different, update this line in `lib/services/distributed_service.dart`:
 
 ```dart
-static const String realDeviceHost = '172.22.160.1'; // Change to your PC IP
+static const String realDeviceHost = '192.168.0.35'; // Change to your PC IP
 ```
 
 ### 3. Alternative: Use .env File
@@ -44,7 +44,7 @@ static const String realDeviceHost = '172.22.160.1'; // Change to your PC IP
 Create or update `.env` file in `blockchain_fyp/` directory:
 
 ```env
-BACKEND_URL=http://172.22.160.1:3000
+BACKEND_URL=http://192.168.0.35:3000
 ```
 
 This will override the auto-detection.
@@ -68,7 +68,7 @@ Server running on http://localhost:3000
 3. Run the Flutter app
 4. Check logs - you should see:
    ```
-   📱 Detected Real Android Device, using: http://172.22.160.1:3000
+   📱 Detected Real Android Device, using: http://192.168.0.35:3000
    ✅ Backend health: OK, Database: connected
    ```
 
@@ -93,7 +93,7 @@ New-NetFirewallRule -DisplayName "Node.js Backend" -Direction Inbound -LocalPort
 ### Test Backend from Device:
 
 1. Open browser on your Android device
-2. Go to: `http://172.22.160.1:3000/health`
+2. Go to: `http://192.168.0.35:3000/health`
 3. Should see: `{"status":"ok","database":"connected"}`
 
 ### Test from Flutter App:
@@ -140,17 +140,17 @@ Health check timeout - backend server may not be running
 
 ## 📝 Current Configuration
 
-- **PC IP**: `172.22.160.1`
+- **PC IP**: `192.168.0.35`
 - **Backend Port**: `3000`
-- **Backend URL**: `http://172.22.160.1:3000`
+- **Backend URL**: `http://192.168.0.35:3000`
 
 ## ✅ Verification Checklist
 
 - [ ] Backend server running (`npm run dev`)
 - [ ] PC and phone on same WiFi
 - [ ] Firewall allows port 3000
-- [ ] IP address is correct (172.22.160.1)
-- [ ] Can access `http://172.22.160.1:3000/health` from device browser
+- [ ] IP address is correct (192.168.0.35)
+- [ ] Can access `http://192.168.0.35:3000/health` from device browser
 - [ ] Flutter app shows "✅ Backend health: OK"
 
 ---

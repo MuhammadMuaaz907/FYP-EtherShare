@@ -57,6 +57,19 @@ const ledgerSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  // Gas calculation (blockchain-like)
+  gas_used: {
+    type: Number,
+    default: 0
+  },
+  gas_price: {
+    type: Number,
+    default: 1
+  },
+  transaction_fee: {
+    type: Number,
+    default: 0 // Calculated as gas_used * gas_price
+  },
   verified: {
     type: Boolean,
     default: false

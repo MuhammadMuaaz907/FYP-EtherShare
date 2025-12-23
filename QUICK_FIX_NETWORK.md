@@ -36,7 +36,7 @@ npm run dev
 ```
 🚀 EtherShare Backend Server Started
 📍 Local: http://localhost:3000
-🌐 Network: http://172.22.160.1:3000
+🌐 Network: http://192.168.0.35:3000
 ```
 
 ---
@@ -45,7 +45,7 @@ npm run dev
 
 **From your Android device browser:**
 1. Open Chrome
-2. Go to: `http://172.22.160.1:3000/health`
+2. Go to: `http://192.168.0.35:3000/health`
 3. Should see JSON response ✅
 
 **If this works, Flutter app will work!**

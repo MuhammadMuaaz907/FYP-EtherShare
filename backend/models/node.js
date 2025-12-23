@@ -56,6 +56,47 @@ const nodeSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // Blockchain-like hash chain fields
+  previous_hash: {
+    type: String,
+    required: true,
+    default: '0' // Genesis node
+  },
+  current_hash: {
+    type: String,
+    required: true
+  },
+  // Gas calculation (like real blockchain)
+  gas_used: {
+    type: Number,
+    default: 0
+  },
+  gas_price: {
+    type: Number,
+    default: 1 // Base gas price
+  },
+  transaction_fee: {
+    type: Number,
+    default: 0 // Calculated as gas_used * gas_price
+  },
+  // Immutability - if node is modified, mark as deprecated
+  is_deprecated: {
+    type: Boolean,
+    default: false
+  },
+  deprecated_by: {
+    type: String, // New node_id that replaced this one
+    default: null
+  },
+  deprecated_at: {
+    type: Date,
+    default: null
+  },
+  // Chain integrity
+  chain_broken: {
+    type: Boolean,
+    default: false
+  },
   created_at: {
     type: Date,
     default: Date.now
@@ -63,6 +104,12 @@ const nodeSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+// Indexes for blockchain-like operations
+nodeSchema.index({ previous_hash: 1 });
+nodeSchema.index({ current_hash: 1 });
+nodeSchema.index({ chain_position: 1, is_deprecated: 1 });
+nodeSchema.index({ is_deprecated: 1 });
 
 module.exports = mongoose.model('Node', nodeSchema);
 

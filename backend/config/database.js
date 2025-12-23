@@ -120,6 +120,19 @@ class Database {
       await channelsCollection.createIndex({ is_default: 1 });
       await channelsCollection.createIndex({ deleted: 1 });
       
+      // Nodes collection indexes (blockchain-like)
+      const nodesCollection = db.collection('nodes');
+      await nodesCollection.createIndex({ node_id: 1 }, { unique: true });
+      await nodesCollection.createIndex({ previous_hash: 1 });
+      await nodesCollection.createIndex({ current_hash: 1 });
+      await nodesCollection.createIndex({ chain_position: 1, is_deprecated: 1 });
+      await nodesCollection.createIndex({ is_deprecated: 1 });
+      
+      // Ledger collection indexes (for gas)
+      const ledgerCollection = db.collection('ledgers');
+      await ledgerCollection.createIndex({ gas_used: 1 });
+      await ledgerCollection.createIndex({ transaction_fee: 1 });
+      
       console.log('✅ MongoDB: Indexes created successfully');
     } catch (error) {
       console.warn('⚠️ MongoDB: Index creation warning -', error.message);
