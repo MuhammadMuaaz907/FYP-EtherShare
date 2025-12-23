@@ -1,5 +1,6 @@
 const Ledger = require('../models/ledger');
 const HashChain = require('../utils/hashChain');
+const GasCalculator = require('../utils/gasCalculator');
 const crypto = require('crypto');
 
 /**
@@ -19,6 +20,11 @@ class LedgerService {
       const blockNumber = lastBlock ? lastBlock.block_number + 1 : 0;
       const previousHash = lastBlock ? lastBlock.current_hash : '0';
       
+      // Calculate gas for transaction (blockchain-like)
+      const gasUsed = GasCalculator.calculateTransactionGas(transactionData);
+      const gasPrice = GasCalculator.getCurrentGasPrice();
+      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+      
       // Create block data
       const blockData = {
         block_number: blockNumber,
@@ -29,12 +35,15 @@ class LedgerService {
         receiver_address: transactionData.receiver_address,
         workspace_id: transactionData.workspace_id,
         timestamp: Date.now(),
-        previous_hash: previousHash
+        previous_hash: previousHash,
+        gas_used: gasUsed,
+        gas_price: gasPrice,
+        transaction_fee: transactionFee
       };
       
-      // Calculate current hash
+      // Calculate current hash (blockchain-like)
       const dataString = JSON.stringify(blockData.data, Object.keys(blockData.data).sort());
-      const combined = `${dataString}${previousHash}${blockNumber}${nodeId}`;
+      const combined = `${dataString}${previousHash}${blockNumber}${nodeId}${gasUsed}${transactionFee}`;
       const currentHash = crypto.createHash('sha256').update(combined, 'utf8').digest('hex');
       
       blockData.current_hash = currentHash;
@@ -94,9 +103,11 @@ class LedgerService {
           return false;
         }
         
-        // Recalculate hash
+        // Recalculate hash (include gas fields)
         const dataString = JSON.stringify(block.data, Object.keys(block.data).sort());
-        const combined = `${dataString}${block.previous_hash}${block.block_number}${nodeId}`;
+        const gasUsed = block.gas_used || 0;
+        const transactionFee = block.transaction_fee || 0;
+        const combined = `${dataString}${block.previous_hash}${block.block_number}${nodeId}${gasUsed}${transactionFee}`;
         const calculatedHash = crypto.createHash('sha256').update(combined, 'utf8').digest('hex');
         
         if (calculatedHash !== block.current_hash) {

@@ -38,7 +38,7 @@ try {
     Write-Host ""
     Write-Host "📋 Next Steps:" -ForegroundColor Cyan
     Write-Host "   1. Make sure backend server is running: npm run dev" -ForegroundColor White
-    Write-Host "   2. Test from Android device: http://192.168.0.34:3000/health" -ForegroundColor White
+    Write-Host "   2. Test from Android device: http://192.168.0.35:3000/health" -ForegroundColor White
     Write-Host "   3. Verify PC and phone are on same WiFi network" -ForegroundColor White
     Write-Host ""
     

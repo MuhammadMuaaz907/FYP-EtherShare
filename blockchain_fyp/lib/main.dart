@@ -130,7 +130,7 @@ class _MyAppState extends State<MyApp> {
           print('💡 To enable backend features:');
           print('   1. Start backend: cd backend && npm run dev');
           print('   2. Ensure PC and phone are on same WiFi');
-          print('   3. Verify PC IP: 192.168.0.34');
+          print('   3. Verify PC IP: 192.168.0.35');
         }
       } catch (e) {
         // Don't crash app if initialization fails

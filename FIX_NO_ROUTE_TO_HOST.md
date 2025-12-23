@@ -8,7 +8,7 @@ The backend server was only listening on `localhost` (127.0.0.1), which means it
 
 Updated `backend/server.js` to listen on `0.0.0.0` (all network interfaces), allowing connections from:
 - ✅ localhost (127.0.0.1)
-- ✅ Local network IP (172.22.160.1)
+- ✅ Local network IP (192.168.0.35)
 - ✅ Android emulator (10.0.2.2)
 
 ## 📋 Steps to Fix
@@ -28,7 +28,7 @@ You should now see:
 ```
 🚀 EtherShare Backend Server Started
 📍 Local: http://localhost:3000
-🌐 Network: http://172.22.160.1:3000
+🌐 Network: http://192.168.0.35:3000
 📱 Android Emulator: http://10.0.2.2:3000
 ```
 
@@ -61,7 +61,7 @@ Should show: `{"success":true,"message":"EtherShare Backend API is running",...}
 
 **From your Android device browser:**
 ```
-http://172.22.160.1:3000/health
+http://192.168.0.35:3000/health
 ```
 Should show the same JSON response.
 
@@ -72,8 +72,8 @@ Should show the same JSON response.
 3. Run Flutter app: `flutter run`
 4. Check logs - should see:
    ```
-   📱 Detected Real Android Device, using: http://172.22.160.1:3000
-   🔍 Checking backend health at: http://172.22.160.1:3000/health
+   📱 Detected Real Android Device, using: http://192.168.0.35:3000
+   🔍 Checking backend health at: http://192.168.0.35:3000/health
    ✅ Backend health: OK, Database: connected
    ```
 
@@ -97,7 +97,7 @@ Should show port 3000 is LISTENING
 - Check phone WiFi settings
 
 **Check 4: IP Address**
-- Verify PC IP is `172.22.160.1`
+- Verify PC IP is `192.168.0.35`
 - If different, update `distributed_service.dart`:
   ```dart
   static const String realDeviceHost = 'YOUR_PC_IP';
@@ -125,7 +125,7 @@ Should show port 3000 is LISTENING
 - [ ] Backend server restarted (listening on 0.0.0.0)
 - [ ] Firewall allows port 3000
 - [ ] Can access `http://localhost:3000/health` from PC
-- [ ] Can access `http://172.22.160.1:3000/health` from phone browser
+- [ ] Can access `http://192.168.0.35:3000/health` from phone browser
 - [ ] PC and phone on same WiFi network
 - [ ] Flutter app shows "✅ Backend health: OK"
 
@@ -133,7 +133,7 @@ Should show port 3000 is LISTENING
 
 **From Android device browser:**
 1. Open Chrome/Browser
-2. Go to: `http://172.22.160.1:3000/health`
+2. Go to: `http://192.168.0.35:3000/health`
 3. Should see JSON response
 
 If this works, Flutter app will also work!
