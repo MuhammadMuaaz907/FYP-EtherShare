@@ -4,6 +4,7 @@ const { getCollection } = require('../utils/db');
 const { validateMessage } = require('../middleware/validation');
 const { optionalAuth } = require('../middleware/auth');
 const HashChain = require('../utils/hashChain');
+const GasCalculator = require('../utils/gasCalculator');
 
 /**
  * @route   POST /api/messages
@@ -11,6 +12,8 @@ const HashChain = require('../utils/hashChain');
  * @access  Public (add auth later)
  */
 router.post('/', validateMessage, async (req, res) => {
+  const startTime = process.hrtime.bigint(); // Start timing
+  
   try {
     const messagesCollection = getCollection('messages');
     const {
@@ -56,17 +59,89 @@ router.post('/', validateMessage, async (req, res) => {
           }
         : { workspace_id: workspaceId };
     
-    // Add hash chain fields
-    const messageWithHash = await HashChain.addHashFields(
-      messagesCollection,
-      messageData,
-      filter
+    // Add hash chain fields (with retry mechanism for race conditions)
+    // CRITICAL: This handles rapid message insertion by ensuring atomic hash chain updates
+    let messageWithHash;
+    let insertSuccess = false;
+    let retryAttempts = 0;
+    const maxRetries = 5; // Increased from 3 to 5 for better handling of rapid messages
+    
+    while (!insertSuccess && retryAttempts < maxRetries) {
+      try {
+        // Get hash fields with built-in race condition handling
+        messageWithHash = await HashChain.addHashFields(
+          messagesCollection,
+          messageData,
+          filter,
+          retryAttempts
+        );
+        
+        // CRITICAL: Verify hash is still valid right before insert
+        // This is the final check to prevent chain breaks
+        const verifyInfo = await HashChain.getAndVerifyLastHash(
+          messagesCollection,
+          filter,
+          messageWithHash.previous_hash
+        );
+        
+        if (!verifyInfo.isValid) {
+          // Hash changed between calculation and insert - retry
+          console.log(`⚠️ Hash changed right before insert - retrying (attempt ${retryAttempts + 1}/${maxRetries})`);
+          retryAttempts++;
+          await new Promise(resolve => setTimeout(resolve, 30 * retryAttempts));
+          continue;
+        }
+        
+        // Insert message - this is atomic
+        await messagesCollection.insertOne(messageWithHash);
+        insertSuccess = true;
+        
+        // Log success
+        if (retryAttempts > 0) {
+          console.log(`✅ Message inserted after ${retryAttempts} retries`);
+        }
+      } catch (error) {
+        retryAttempts++;
+        if (retryAttempts >= maxRetries) {
+          console.error(`❌ Failed to insert message after ${maxRetries} retries: ${error.message}`);
+          throw error;
+        }
+        // If it's a duplicate key error or race condition, retry
+        if (error.code === 11000 || error.message.includes('E11000')) {
+          console.log(`⚠️ Duplicate key or race condition detected - retrying (attempt ${retryAttempts}/${maxRetries})`);
+          // Exponential backoff delay
+          await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, retryAttempts - 1)));
+        } else {
+          // For other errors, also retry (might be transient)
+          console.log(`⚠️ Insert error (${error.message}) - retrying (attempt ${retryAttempts}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, 50 * retryAttempts));
+        }
+      }
+    }
+    
+    // Calculate execution time and gas
+    const endTime = process.hrtime.bigint();
+    const executionTimeMs = Number(endTime - startTime) / 1000000; // Convert nanoseconds to milliseconds
+    
+    // Calculate gas based on execution time
+    const gasUsed = GasCalculator.calculateMessageGas(executionTimeMs, messageData);
+    const gasPrice = GasCalculator.getCurrentGasPrice();
+    const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+    
+    // Update message with gas information
+    await messagesCollection.updateOne(
+      { message_id: messageId },
+      {
+        $set: {
+          gas_used: gasUsed,
+          gas_price: gasPrice,
+          transaction_fee: transactionFee,
+          transaction_time_ms: Math.round(executionTimeMs * 100) / 100
+        }
+      }
     );
     
-    // Insert message
-    await messagesCollection.insertOne(messageWithHash);
-    
-    console.log(`✅ Message added: ${messageId}`);
+    console.log(`✅ Message added: ${messageId} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
     
     return res.status(201).json({
       success: true,
@@ -76,15 +151,30 @@ router.post('/', validateMessage, async (req, res) => {
         workspace_id: workspaceId,
         sender_address: senderAddress.toLowerCase().trim(),
         message_text: messageText,
-        timestamp: timestamp
+        timestamp: timestamp,
+        gas_used: gasUsed,
+        gas_price: gasPrice,
+        transaction_fee: transactionFee,
+        transaction_time_ms: Math.round(executionTimeMs * 100) / 100
       }
     });
   } catch (error) {
-    console.error('❌ Add message error:', error);
+    // Calculate gas even on error
+    const endTime = process.hrtime.bigint();
+    const executionTimeMs = Number(endTime - startTime) / 1000000;
+    const gasUsed = GasCalculator.calculateMessageGas(executionTimeMs, req.body);
+    const gasPrice = GasCalculator.getCurrentGasPrice();
+    const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+    
+    console.error(`❌ Add message error: ${error.message} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
     return res.status(500).json({
       success: false,
       error: 'Failed to send message',
-      message: error.message
+      message: error.message,
+      gas_used: gasUsed,
+      gas_price: gasPrice,
+      transaction_fee: transactionFee,
+      transaction_time_ms: Math.round(executionTimeMs * 100) / 100
     });
   }
 });

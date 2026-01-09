@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:get_it/get_it.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/distributed_service.dart';
+import 'services/hybrid_storage_service.dart';
 import 'services/session_service.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
@@ -120,7 +121,8 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
       }
       if (userAddress == null) return;
 
-      List<Map<String, dynamic>> loaded = await DistributedService.getDirectMessages(
+      // Use HybridStorageService (works offline)
+      List<Map<String, dynamic>> loaded = await HybridStorageService.instance.getDirectMessages(
         user1Address: userAddress!,
         user2Address: widget.memberAddress,
       );
@@ -171,7 +173,7 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
       }
       if (userAddress == null) return null;
       
-      final profile = await DistributedService.getUserProfile(userAddress!);
+      final profile = await HybridStorageService.instance.getUserProfile(userAddress!);
       if (profile != null) {
         return profile['username'];
       }
@@ -194,7 +196,8 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
         return;
       }
 
-      List<Map<String, dynamic>> loaded = await DistributedService.getDirectMessages(
+      // Use HybridStorageService (works offline)
+      List<Map<String, dynamic>> loaded = await HybridStorageService.instance.getDirectMessages(
         user1Address: userAddress!,
         user2Address: widget.memberAddress,
       );
@@ -298,17 +301,8 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
       final messageText = _messageController.text.trim();
       _messageController.clear();
       
-      // Get node ID first
-      final nodeId = await DistributedService.getFirstNodeId();
-      if (nodeId == null) {
-        setState(() {
-          _messages.removeLast();
-          status = 'No node available. Please check backend connection.';
-        });
-        return;
-      }
-      
-      final messageId = await DistributedService.addMessage(
+      // Use HybridStorageService (works offline + P2P)
+      final messageId = await HybridStorageService.instance.addMessage(
         workspaceId: widget.workspaceName,
         senderAddress: userAddress!,
         receiverAddress: widget.memberAddress,

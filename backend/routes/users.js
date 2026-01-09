@@ -12,11 +12,14 @@ const { optionalAuth } = require('../middleware/auth');
 router.post('/profile', validateUserProfile, async (req, res) => {
   try {
     const usersCollection = getCollection('users');
-    const { address, username, email } = req.body;
+    const { address, username, email, firstName, lastName, designation } = req.body;
     const timestamp = Date.now();
     
     const normalizedAddress = address.toLowerCase().trim();
     const normalizedUsername = (username || '').trim();
+    const normalizedFirstName = (firstName || '').trim();
+    const normalizedLastName = (lastName || '').trim();
+    const normalizedDesignation = (designation || '').trim();
     
     if (!normalizedUsername || normalizedUsername.length === 0) {
       return res.status(400).json({
@@ -62,32 +65,38 @@ router.post('/profile', validateUserProfile, async (req, res) => {
         }
       }
       
-      // Update existing user
+      // Update existing user with all profile fields
+      const updateData = {
+        username: normalizedUsername,
+        email,
+        updated_at: timestamp
+      };
+      
+      // Add optional fields if provided
+      if (normalizedFirstName) updateData.firstName = normalizedFirstName;
+      if (normalizedLastName) updateData.lastName = normalizedLastName;
+      if (normalizedDesignation) updateData.designation = normalizedDesignation;
+      
       await usersCollection.updateOne(
         { address: normalizedAddress },
         {
-          $set: {
-            username: normalizedUsername,
-            email,
-            updated_at: timestamp
-          }
+          $set: updateData
         }
       );
+      
+      // Get updated user data
+      const updatedUser = await usersCollection.findOne({ address: normalizedAddress });
+      delete updatedUser._id;
       
       console.log(`✅ User profile updated: ${normalizedAddress}`);
       
       return res.json({
         success: true,
         message: 'User profile updated successfully',
-        data: {
-          address: normalizedAddress,
-          username: normalizedUsername,
-          email,
-          updated_at: timestamp
-        }
+        data: updatedUser
       });
     } else {
-      // Create new user
+      // Create new user with all profile fields
       const userData = {
         address: normalizedAddress,
         username: normalizedUsername,
@@ -96,9 +105,17 @@ router.post('/profile', validateUserProfile, async (req, res) => {
         updated_at: timestamp
       };
       
+      // Add optional fields if provided
+      if (normalizedFirstName) userData.firstName = normalizedFirstName;
+      if (normalizedLastName) userData.lastName = normalizedLastName;
+      if (normalizedDesignation) userData.designation = normalizedDesignation;
+      
       try {
         await usersCollection.insertOne(userData);
         console.log(`✅ User profile created: ${normalizedAddress}`);
+        
+        // Remove _id before returning
+        delete userData._id;
         
         return res.status(201).json({
           success: true,

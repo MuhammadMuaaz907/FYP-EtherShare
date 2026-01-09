@@ -5,6 +5,9 @@ import '../services/email_otp_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/biometric_service.dart';
 import '../create_workspace_page.dart'; // For workspace creation after 2FA setup
+import '../workspace_home_page.dart'; // For workspace home if user already has workspace
+import '../services/distributed_service.dart'; // For checking workspace membership
+import '../services/session_service.dart'; // For saving session
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// Comprehensive 2FA Setup Screen with Email OTP
@@ -445,7 +448,40 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
     }
   }
 
-  void _showSuccessDialog() {
+  void _showSuccessDialog() async {
+    // Check if user already has workspace membership before showing dialog
+    bool hasWorkspace = false;
+    String workspaceName = 'YourWorkspace';
+    String channelName = 'general';
+    
+    try {
+      print('🔍 Checking workspace membership for: ${widget.userId}');
+      final workspaces = await DistributedService.getUserWorkspaces(widget.userId).timeout(
+        const Duration(seconds: 6),
+        onTimeout: () => [],
+      ).catchError((e) {
+        print('⚠️ Error checking workspace membership: $e');
+        return <Map<String, dynamic>>[];
+      });
+      
+      hasWorkspace = workspaces.isNotEmpty;
+      
+      if (hasWorkspace) {
+        workspaceName = workspaces.first['name'] ?? 
+                       workspaces.first['workspaceName'] ?? 
+                       'YourWorkspace';
+        channelName = 'general';
+        print('✅ User has workspace membership: $workspaceName');
+      } else {
+        print('⚠️ User has no workspace membership - will navigate to workspace creation');
+      }
+    } catch (e) {
+      print('⚠️ Error checking workspace: $e');
+      hasWorkspace = false;
+    }
+    
+    if (!mounted) return;
+    
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -464,21 +500,51 @@ class _Setup2FAScreenState extends State<Setup2FAScreen>
             ),
           ],
         ),
-        content: const Text(
-          'Two-factor authentication has been successfully enabled for your account.',
-          style: TextStyle(fontSize: 16),
+        content: Text(
+          hasWorkspace
+              ? 'Two-factor authentication has been successfully enabled. Redirecting to your workspace...'
+              : 'Two-factor authentication has been successfully enabled for your account.',
+          style: const TextStyle(fontSize: 16),
         ),
         actions: [
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(context); // Close dialog
-              // Navigate to workspace creation page after 2FA setup
-              // Using pushReplacement to replace the entire navigation stack
-              Navigator.pushAndRemoveUntil(
-                context,
-                MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.userId)),
-                (route) => false, // Remove all previous routes
-              );
+              
+              if (hasWorkspace) {
+                // User already has workspace - navigate to workspace home
+                print('✅ Navigating to existing workspace: $workspaceName');
+                
+                // Save login session
+                await SessionService.saveLoginSession(
+                  widget.userId,
+                  workspaceName,
+                  channelName,
+                );
+                
+                if (mounted) {
+                  Navigator.pushAndRemoveUntil(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => TeamHomePage(
+                        workspaceName: workspaceName,
+                        channelName: channelName,
+                      ),
+                    ),
+                    (route) => false, // Remove all previous routes
+                  );
+                }
+              } else {
+                // User doesn't have workspace - navigate to workspace creation
+                print('➡️ Navigating to workspace creation');
+                if (mounted) {
+                  Navigator.pushAndRemoveUntil(
+                    context,
+                    MaterialPageRoute(builder: (_) => CreateWorkspacePage(userAddress: widget.userId)),
+                    (route) => false, // Remove all previous routes
+                  );
+                }
+              }
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF0F365F),

@@ -14,6 +14,7 @@ import 'services/invite_service.dart';
 import 'services/distributed_service.dart';
 import 'services/session_service.dart';
 import 'services/invite_link_manager.dart';
+import 'services/hybrid_storage_service.dart';
 import 'screens/accept_invite_screen.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -29,11 +30,18 @@ Future<void> main() async {
     // Load environment variables
     try {
       await dotenv.load(fileName: '.env');
-      print('Environment file (.env) loaded successfully');
+      print('✅ Environment file (.env) loaded successfully');
+      final backendUrl = dotenv.env['BACKEND_URL'];
+      if (backendUrl != null && backendUrl.isNotEmpty) {
+        print('🌐 BACKEND_URL configured: $backendUrl');
+      } else {
+        print('⚠️ BACKEND_URL not found in .env - will use auto-detection');
+      }
     } catch (e) {
       // If .env is missing, log warning but continue
-      print('Warning: Could not load .env file: $e');
-      print('SMTP configuration will be required when sending emails.');
+      print('⚠️ Warning: Could not load .env file: $e');
+      print('   SMTP configuration will be required when sending emails.');
+      print('   Backend URL will use auto-detection (localhost/network IP)');
     }
     
     print('✅ Services initialized');
@@ -91,19 +99,33 @@ class _MyAppState extends State<MyApp> {
   Future<void> _initializeServices() async {
     // Don't await - let app start even if backend is unavailable
     // This prevents blocking the UI during startup
+    // IMPORTANT: Use Future.microtask to ensure initialization happens after build
     Future.microtask(() async {
       try {
         print('🚀 Initializing Distributed System...');
+        print('📱 App restart detected - checking for logged-in user...');
         
-        // Try to connect with timeout - don't block if it fails
+        // Try to connect with longer timeout for Cloudflare Tunnel
+        // Cloudflare Tunnel can be slow, so use longer timeout
+        final backendUrl = DistributedService.getCurrentBackendUrl();
+        final isCloudflareTunnel = backendUrl.contains('trycloudflare.com') || 
+                                   backendUrl.contains('cloudflare');
+        final connectTimeout = isCloudflareTunnel 
+            ? const Duration(seconds: 15)  // 15 seconds for Cloudflare Tunnel
+            : const Duration(seconds: 4);    // 4 seconds for local network
+        
+        print('⏱️ Connect timeout: ${connectTimeout.inSeconds}s (${isCloudflareTunnel ? "Cloudflare Tunnel" : "Local Network"})');
+        
         final connected = await DistributedService.connect().timeout(
-          const Duration(seconds: 4),
+          connectTimeout,
           onTimeout: () {
-            print('⚠️ Backend connection timeout - continuing without backend');
+            print('⚠️ Backend connection timeout after ${connectTimeout.inSeconds}s - continuing without backend');
+            print('💡 Server might still be accessible - will try actual API calls when needed');
             return false;
           },
         ).catchError((e) {
           print('⚠️ Backend connection error - continuing without backend');
+          print('💡 Server might still be accessible - will try actual API calls when needed');
           return false;
         });
         
@@ -123,6 +145,26 @@ class _MyAppState extends State<MyApp> {
               print('✅ Chain structure ready');
             }
           } catch (e) {
+            print('⚠️ Chain build error: $e');
+          }
+          
+          // Initialize Hybrid Storage (will be fully initialized after user login)
+          // Check if user is already logged in
+          try {
+            final session = await SessionService.getLoginSession();
+            final isLoggedIn = session['isLoggedIn'] == 'true';
+            final userAddress = session['userAddress'] ?? '';
+            
+            if (isLoggedIn && userAddress.isNotEmpty) {
+              print('🔄 Initializing Hybrid Storage for logged-in user...');
+              await HybridStorageService.instance.initialize(
+                userAddress: userAddress,
+              );
+              print('✅ Hybrid Storage initialized');
+            } else {
+              print('ℹ️ User not logged in, Hybrid Storage will initialize after login');
+            }
+          } catch (e) {
             print('⚠️ Chain build error (non-critical): $e');
           }
         } else {
@@ -131,6 +173,32 @@ class _MyAppState extends State<MyApp> {
           print('   1. Start backend: cd backend && npm run dev');
           print('   2. Ensure PC and phone are on same WiFi');
           print('   3. Verify PC IP: 192.168.0.35');
+        }
+        
+        // IMPORTANT: Initialize Hybrid Storage even if backend is unavailable
+        // This ensures P2P works in offline mode after app restart
+        try {
+          print('🔍 Checking for logged-in user session (app restart)...');
+          final session = await SessionService.getLoginSession();
+          final isLoggedIn = session['isLoggedIn'] == 'true';
+          final userAddress = session['userAddress'] ?? '';
+          
+          print('   Session check: isLoggedIn=$isLoggedIn, userAddress=${userAddress.isNotEmpty ? "${userAddress.substring(0, 10)}..." : "empty"}');
+          
+          if (isLoggedIn && userAddress.isNotEmpty) {
+            print('🔄 Initializing Hybrid Storage for offline P2P (backend unavailable)...');
+            print('   User: ${userAddress.substring(0, 10)}...');
+            await HybridStorageService.instance.initialize(
+              userAddress: userAddress,
+            );
+            print('✅ Hybrid Storage initialized (offline mode)');
+            print('   P2P server should be running now');
+          } else {
+            print('ℹ️ User not logged in, Hybrid Storage will initialize after login');
+          }
+        } catch (e, stackTrace) {
+          print('❌ Hybrid Storage initialization error: $e');
+          print('   Stack trace: $stackTrace');
         }
       } catch (e) {
         // Don't crash app if initialization fails

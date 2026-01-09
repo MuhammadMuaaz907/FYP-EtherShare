@@ -5,6 +5,9 @@ import 'login_screen.dart';
 import 'package:flutter/services.dart';
 import 'services/session_service.dart';
 import 'services/distributed_service.dart';
+import 'services/hybrid_storage_service.dart';
+import 'services/p2p_service.dart';
+import 'dart:async';
 import 'pages/dms_page.dart';
 import 'pages/activity_page.dart';
 import 'invite_teammates_page.dart';
@@ -31,6 +34,7 @@ class _TeamHomePageState extends State<TeamHomePage> {
   int _memberCount = 0;
   bool _isLoadingMembers = true;
   String? _inviterAddress;
+  String? _workspaceId; // Store workspaceId for reuse
   int _currentIndex = 0;
   List<String> _channels = ['General', 'Random'];
   // Map to track display name -> original database name (for proper database lookups)
@@ -41,6 +45,10 @@ class _TeamHomePageState extends State<TeamHomePage> {
   List<Map<String, dynamic>> _searchResults = [];
 
   DateTime? _lastChannelLoadTime;
+  
+  // Real-time channel updates
+  Timer? _channelPollingTimer;
+  bool _isCheckingChannels = false;
 
   @override
   void initState() {
@@ -51,6 +59,35 @@ class _TeamHomePageState extends State<TeamHomePage> {
     _loadData();
     _searchController.addListener(_onSearchChanged);
     _searchFocusNode.addListener(_onSearchFocusChanged);
+    
+    // Set up real-time channel updates
+    _setupRealTimeChannelUpdates();
+  }
+  
+  /// Set up real-time channel updates (polling + P2P callbacks)
+  void _setupRealTimeChannelUpdates() {
+    // Set up P2P callback for channel creation events
+    P2PService.instance.onChannelCreated = (channelData) {
+      final workspaceId = channelData['workspace_id']?.toString();
+      final channelName = channelData['channel_name']?.toString();
+      
+      // Check if this channel is for the current workspace
+      final effectiveWorkspaceId = _workspaceId ?? widget.workspaceName;
+      if (workspaceId == effectiveWorkspaceId || workspaceId == widget.workspaceName) {
+        print('📢 Real-time P2P channel creation received: $channelName in workspace $workspaceId');
+        // Reload channels to show the new channel
+        _loadChannels();
+      }
+    };
+    
+    // Start periodic polling for new channels (every 3 seconds)
+    _channelPollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (mounted && !_isCheckingChannels) {
+        _checkForNewChannels();
+      }
+    });
+    
+    print('✅ Real-time channel updates enabled (polling every 3s + P2P callbacks)');
   }
 
   @override
@@ -68,6 +105,10 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
   @override
   void dispose() {
+    // Cancel real-time update timer
+    _channelPollingTimer?.cancel();
+    _channelPollingTimer = null;
+    
     _searchController.removeListener(_onSearchChanged);
     _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchController.dispose();
@@ -178,8 +219,77 @@ class _TeamHomePageState extends State<TeamHomePage> {
   Future<void> _loadData() async {
     await _loadUserAddress();
     await _loadUserName();
+    // CRITICAL: Resolve workspace ID FIRST before loading members and channels
+    // This ensures consistent workspace ID usage throughout
+    await _resolveWorkspaceId();
     await _loadWorkspaceMembers();
     await _loadChannels();
+  }
+  
+  /// Resolve workspace ID from workspace name (CRITICAL for consistency)
+  Future<void> _resolveWorkspaceId() async {
+    if (_workspaceId != null) {
+      return; // Already resolved
+    }
+    
+    try {
+      if (userAddress == null) {
+        await _loadUserAddress();
+      }
+      
+      if (userAddress == null) {
+        print('⚠️ Cannot resolve workspace ID: user address is null');
+        _workspaceId = widget.workspaceName; // Fallback
+        return;
+      }
+      
+      print('🔍 Resolving workspace ID for workspace name: ${widget.workspaceName}');
+      
+      // Try SQLite first (works offline)
+      try {
+        final sqliteWorkspaces = await HybridStorageService.instance.getUserWorkspaces(userAddress!);
+        final sqliteWorkspace = sqliteWorkspaces.firstWhere(
+          (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+          orElse: () => {},
+        );
+        
+        if (sqliteWorkspace.isNotEmpty) {
+          _workspaceId = sqliteWorkspace['workspace_id']?.toString() ?? 
+                        sqliteWorkspace['workspaceId']?.toString() ??
+                        widget.workspaceName;
+          print('✅ Resolved workspace ID from SQLite: $_workspaceId');
+          return;
+        }
+      } catch (e) {
+        print('⚠️ Could not resolve workspace ID from SQLite: $e');
+      }
+      
+      // Try server (if online)
+      try {
+        final workspaces = await DistributedService.getUserWorkspaces(userAddress!);
+        final workspace = workspaces.firstWhere(
+          (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+          orElse: () => {},
+        );
+        
+        if (workspace.isNotEmpty) {
+          _workspaceId = workspace['workspace_id']?.toString() ?? 
+                        workspace['workspaceId']?.toString() ??
+                        widget.workspaceName;
+          print('✅ Resolved workspace ID from server: $_workspaceId');
+          return;
+        }
+      } catch (e) {
+        print('⚠️ Could not resolve workspace ID from server: $e');
+      }
+      
+      // Fallback to workspace name
+      _workspaceId = widget.workspaceName;
+      print('⚠️ Using workspace name as ID (fallback): $_workspaceId');
+    } catch (e) {
+      print('❌ Error resolving workspace ID: $e');
+      _workspaceId = widget.workspaceName; // Fallback
+    }
   }
 
   Future<void> _loadChannels() async {
@@ -190,15 +300,20 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
       print('📋 Loading channels for workspace: ${widget.workspaceName}');
       
-      // Ensure user address is loaded
-      if (userAddress == null) {
-        await _loadUserAddress();
+      // CRITICAL: Ensure workspace ID is resolved BEFORE loading channels
+      // This prevents different channel orders (workspace name vs workspace ID)
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
       }
       
-      // Use the new getWorkspaceChannels method to load channels from database
+      // Use resolved workspace ID (never use workspace name directly)
+      final effectiveWorkspaceId = _workspaceId ?? widget.workspaceName;
+      print('📋 Using workspace ID: $effectiveWorkspaceId (name: ${widget.workspaceName})');
+      
+      // Use HybridStorageService (works offline with SQLite fallback)
       // Pass memberAddress so user only sees channels they have access to
-      final channels = await DistributedService.getWorkspaceChannels(
-        workspaceId: widget.workspaceName,
+      final channels = await HybridStorageService.instance.getWorkspaceChannels(
+        workspaceId: effectiveWorkspaceId,
         memberAddress: userAddress, // Filter channels accessible to this member
       );
 
@@ -261,6 +376,89 @@ class _TeamHomePageState extends State<TeamHomePage> {
           _channels = ['General', 'Random'];
         });
       }
+    }
+  }
+
+  /// Check for new channels (real-time update)
+  Future<void> _checkForNewChannels() async {
+    // Prevent multiple simultaneous checks
+    if (_isCheckingChannels || !mounted) {
+      return;
+    }
+    
+    _isCheckingChannels = true;
+    
+    try {
+      // CRITICAL: Ensure workspace ID is resolved BEFORE checking for new channels
+      // This ensures consistent workspace ID usage
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      
+      // Use resolved workspace ID (never use workspace name directly)
+      final effectiveWorkspaceId = _workspaceId ?? widget.workspaceName;
+      
+      // Load channels from server
+      final loadedChannels = await HybridStorageService.instance.getWorkspaceChannels(
+        workspaceId: effectiveWorkspaceId,
+        memberAddress: userAddress,
+      );
+
+      // Ensure General and Random are always present
+      final Set<String> channelSet = loadedChannels.toSet();
+      if (!channelSet.contains('General')) {
+        loadedChannels.insert(0, 'General');
+      }
+      if (!channelSet.contains('Random')) {
+        final generalIndex = loadedChannels.indexOf('General');
+        loadedChannels.insert(generalIndex + 1, 'Random');
+      }
+
+      // Sort channels
+      loadedChannels.sort((a, b) {
+        final aLower = a.toLowerCase();
+        final bLower = b.toLowerCase();
+        if (aLower == 'general') return -1;
+        if (bLower == 'general') return 1;
+        if (aLower == 'random') return -1;
+        if (bLower == 'random') return 1;
+        return a.compareTo(b);
+      });
+
+      // Use proper deduplication - compare channel lists
+      final existingChannelsSet = _channels.toSet();
+      final loadedChannelsSet = loadedChannels.toSet();
+      
+      // Find new channels (not already in _channels)
+      final newChannels = loadedChannels.where((channel) => 
+        !existingChannelsSet.contains(channel)
+      ).toList();
+      
+      // Find removed channels (in _channels but not in loadedChannels)
+      final removedChannels = _channels.where((channel) => 
+        !loadedChannelsSet.contains(channel)
+      ).toList();
+      
+      // Only update if there are changes
+      if ((newChannels.isNotEmpty || removedChannels.isNotEmpty) && mounted) {
+        print('📥 Real-time channel update: Found ${newChannels.length} new, ${removedChannels.length} removed (${loadedChannels.length} total, ${_channels.length} existing)');
+        
+        setState(() {
+          _channels = loadedChannels;
+          _lastChannelLoadTime = DateTime.now();
+        });
+        
+        if (newChannels.isNotEmpty) {
+          print('✅ Real-time update: Added ${newChannels.length} new channels: ${newChannels.join(", ")}');
+        }
+        if (removedChannels.isNotEmpty) {
+          print('⚠️ Real-time update: Removed ${removedChannels.length} channels: ${removedChannels.join(", ")}');
+        }
+      }
+    } catch (e) {
+      print('❌ Error checking for new channels: $e');
+    } finally {
+      _isCheckingChannels = false;
     }
   }
 
@@ -342,15 +540,37 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
       print('👥 Loading members for workspace: ${widget.workspaceName}');
       
-      // Get workspace from MongoDB
-      final workspaces = await DistributedService.getUserWorkspaces(userAddress!);
-      final workspace = workspaces.firstWhere(
-        (w) => w['name'] == widget.workspaceName,
-        orElse: () => {},
-      );
+      // Ensure workspace ID is resolved (for offline support)
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
       
-      if (workspace.isEmpty) {
-        print('❌ Workspace not found: ${widget.workspaceName}');
+      // Use resolved workspace ID or fallback to workspace name
+      final effectiveWorkspaceId = _workspaceId ?? widget.workspaceName;
+      
+      // Get workspace info using HybridStorageService (works offline)
+      try {
+        final workspaces = await HybridStorageService.instance.getUserWorkspaces(userAddress!);
+        final workspace = workspaces.firstWhere(
+          (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+          orElse: () => {},
+        );
+        
+        if (workspace.isNotEmpty) {
+          final workspaceId = workspace['workspace_id']?.toString() ?? 
+                             workspace['workspaceId']?.toString() ??
+                             widget.workspaceName;
+          _workspaceId = workspaceId; // Store for reuse
+          _inviterAddress = workspace['inviter_address']?.toString() ?? 
+                           workspace['inviterAddress']?.toString();
+        }
+      } catch (e) {
+        print('⚠️ Could not load workspace info: $e');
+      }
+      
+      // Get members using HybridStorageService (works offline via SQLite fallback)
+      if (effectiveWorkspaceId.isEmpty) {
+        print('❌ WorkspaceId is empty, cannot load members');
         setState(() {
           _isLoadingMembers = false;
           _memberCount = 0;
@@ -358,17 +578,35 @@ class _TeamHomePageState extends State<TeamHomePage> {
         return;
       }
       
-      final workspaceId = workspace['workspace_id'];
-      _inviterAddress = workspace['inviter_address'];
+      print('📦 Loading members for workspace ID: $effectiveWorkspaceId');
+      final allMembers = await HybridStorageService.instance.getWorkspaceMembers(effectiveWorkspaceId);
+
+      // CRITICAL: Deduplicate members by address (case-insensitive)
+      // This prevents duplicate members from showing up
+      final seenAddresses = <String>{};
+      final deduplicatedMembers = <Map<String, dynamic>>[];
       
-      // Get members from MongoDB
-      final members = await DistributedService.getWorkspaceMembers(workspaceId);
+      for (final member in allMembers) {
+        final memberAddr = (member['member_address']?.toString() ?? 
+                           member['memberAddress']?.toString() ?? '').toLowerCase().trim();
+        
+        if (memberAddr.isNotEmpty && !seenAddresses.contains(memberAddr)) {
+          seenAddresses.add(memberAddr);
+          deduplicatedMembers.add(member);
+        } else if (memberAddr.isNotEmpty) {
+          print('⚠️ Skipping duplicate member: $memberAddr');
+        }
+      }
+      
+      print('📊 After deduplication: ${deduplicatedMembers.length} unique members (from ${allMembers.length} total)');
+      final members = deduplicatedMembers;
 
       // Ensure current logged-in user is in the members list
       if (userAddress != null) {
         final userKey = userAddress!.toLowerCase().trim();
         final userExists = members.any(
-            (m) => m['memberAddress']?.toString().toLowerCase() == userKey);
+            (m) => (m['member_address']?.toString() ?? 
+                   m['memberAddress']?.toString() ?? '').toLowerCase() == userKey);
 
         if (!userExists) {
           print('➕ Adding current user to members list');
@@ -378,10 +616,13 @@ class _TeamHomePageState extends State<TeamHomePage> {
           members.add({
             'type': 'member',
             'workspaceName': widget.workspaceName,
-            'inviterAddress': _inviterAddress!,
+            'inviterAddress': _inviterAddress ?? '',
+            'member_address': userKey,
             'memberAddress': userKey,
             'memberDisplayName': userDisplayName,
+            'display_name': userDisplayName,
             'joinedAt': DateTime.now().millisecondsSinceEpoch,
+            'joined_at': DateTime.now().millisecondsSinceEpoch,
             'isCurrentUser': true,
           });
         }
@@ -395,8 +636,9 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
       for (int i = 0; i < members.length; i++) {
         final member = Map<String, dynamic>.from(members[i]); // Create a copy
-        final memberAddr = member['memberAddress']?.toString();
-        if (memberAddr != null) {
+        final memberAddr = (member['member_address']?.toString() ?? 
+                           member['memberAddress']?.toString() ?? '').toLowerCase().trim();
+        if (memberAddr.isNotEmpty) {
           print('📝 Processing member ${i + 1}/${members.length}: $memberAddr');
 
           // Always fetch profile name to ensure we have the latest
@@ -405,15 +647,18 @@ class _TeamHomePageState extends State<TeamHomePage> {
           if (profileName != null && profileName.isNotEmpty) {
             // Update display name with profile name (prefer profile name over stored display name)
             member['memberDisplayName'] = profileName;
+            member['display_name'] = profileName;
             print('✅ Updated member $memberAddr with name: $profileName');
           } else {
             // If no profile name found, check if we have a stored display name
-            final storedName = member['memberDisplayName']?.toString();
+            final storedName = member['memberDisplayName']?.toString() ?? 
+                             member['display_name']?.toString();
             if (storedName == null || storedName.isEmpty) {
               print(
                   '⚠️ No profile name found for member: $memberAddr (will use address)');
               // Clear any empty display name
               member.remove('memberDisplayName');
+              member.remove('display_name');
             } else {
               print(
                   'ℹ️ Using stored display name for $memberAddr: $storedName');
@@ -448,12 +693,13 @@ class _TeamHomePageState extends State<TeamHomePage> {
     }
   }
 
-  /// Get profile name (username) for a given address from MongoDB
+  /// Get profile name (username) for a given address (hybrid - works offline)
   Future<String?> _getProfileNameForAddress(String address) async {
     try {
-      print('🔍 Fetching profile name for: $address from MongoDB');
+      print('🔍 Fetching profile name for: $address (offline-capable)');
 
-      final profile = await DistributedService.getUserProfile(address);
+      // Use HybridStorageService for offline support (falls back to SQLite)
+      final profile = await HybridStorageService.instance.getUserProfile(address);
 
       if (profile != null) {
         final username = profile['username']?.toString();
@@ -1434,12 +1680,37 @@ class _TeamHomePageState extends State<TeamHomePage> {
       }
       if (userAddress == null) throw Exception('User not found');
 
+      // Ensure workspaceId is loaded
+      if (_workspaceId == null) {
+        try {
+          final workspaces = await DistributedService.getUserWorkspaces(userAddress!);
+          final workspace = workspaces.firstWhere(
+            (w) => w['name'] == widget.workspaceName || 
+                   w['workspaceName'] == widget.workspaceName,
+            orElse: () => {},
+          );
+          
+          if (workspace.isNotEmpty) {
+            _workspaceId = workspace['workspace_id']?.toString() ?? 
+                          workspace['workspaceId']?.toString();
+          } else {
+            _workspaceId = widget.workspaceName; // Fallback
+          }
+        } catch (e) {
+          _workspaceId = widget.workspaceName; // Fallback
+        }
+      }
+      
+      if (_workspaceId == null) {
+        throw Exception('Workspace ID not found');
+      }
+
       // Normalize channel name (lowercase for database, but keep original for display)
       final normalizedChannelName = channelName.toLowerCase().trim();
       
       // Check for duplicates before creating (case-insensitive)
       final existingChannels = await DistributedService.getWorkspaceChannels(
-        workspaceId: widget.workspaceName,
+        workspaceId: _workspaceId!,
       );
       
       if (existingChannels.any((c) => c.toLowerCase().trim() == normalizedChannelName)) {
@@ -1448,7 +1719,7 @@ class _TeamHomePageState extends State<TeamHomePage> {
       
       // Save channel metadata to database
       final channelCreated = await DistributedService.createChannel(
-        workspaceId: widget.workspaceName,
+        workspaceId: _workspaceId!,
         channelId: normalizedChannelName,
         creatorAddress: userAddress!,
         channelName: channelName, // Keep original case for display
@@ -1458,13 +1729,66 @@ class _TeamHomePageState extends State<TeamHomePage> {
         throw Exception('Failed to save channel to database. Channel may already exist.');
       }
 
-      // Also add a notification message to general channel (for backward compatibility)
-      await DistributedService.addMessage(
-         workspaceId: widget.workspaceName,
-         channelId: 'general',
-         senderAddress: userAddress!,
-         messageText: 'Channel #$channelName created by user',
+      // CRITICAL: Save channel to SQLite immediately (for offline mode)
+      // This ensures channel shows up even when server is off
+      await HybridStorageService.instance.saveChannelToSQLite(
+        workspaceId: _workspaceId!,
+        channelId: normalizedChannelName,
+        channelName: channelName,
+        creatorAddress: userAddress!,
       );
+      print('✅ Channel "$channelName" saved to SQLite for offline access');
+
+      // CRITICAL: Broadcast channel creation via P2P to all workspace members
+      // This ensures receiver devices know about the new channel even when server is off
+      try {
+        final members = await HybridStorageService.instance.getWorkspaceMembers(_workspaceId!);
+        print('📡 Broadcasting channel creation to ${members.length} workspace members via P2P...');
+        
+        int broadcastCount = 0;
+        for (final member in members) {
+          final memberAddress = member['member_address']?.toString() ?? 
+                              member['memberAddress']?.toString();
+          
+          if (memberAddress == null || memberAddress == userAddress) {
+            continue; // Skip self
+          }
+          
+          try {
+            final broadcasted = await P2PService.instance.broadcastChannelCreated(
+              receiverAddress: memberAddress,
+              workspaceId: _workspaceId!,
+              channelId: normalizedChannelName,
+              channelName: channelName,
+              creatorAddress: userAddress!,
+            );
+            
+            if (broadcasted) {
+              broadcastCount++;
+            }
+          } catch (e) {
+            print('⚠️ Failed to broadcast channel creation to $memberAddress: $e');
+          }
+        }
+        
+        print('✅ Channel creation broadcasted to $broadcastCount/${members.length} members via P2P');
+      } catch (e) {
+        print('⚠️ Could not broadcast channel creation via P2P: $e');
+        // Continue - channel is still created locally
+      }
+
+      // Also add a notification message to general channel (for backward compatibility)
+      try {
+        await DistributedService.addMessage(
+           workspaceId: _workspaceId!,
+           channelId: 'general',
+           senderAddress: userAddress!,
+           messageText: 'Channel #$channelName created by user',
+        );
+      } catch (e) {
+        print('⚠️ Could not add notification message (server might be off): $e');
+        // Continue - channel creation is more important
+      }
 
       // Reload channels from database to ensure consistency
       await _loadChannels();
@@ -1820,11 +2144,13 @@ class _WorkspaceDrawerState extends State<WorkspaceDrawer> {
 
     try {
       if (widget.userAddress.isNotEmpty) {
-        final workspaces = await DistributedService.getUserWorkspaces(widget.userAddress);
+        // Use HybridStorageService for offline support (falls back to SQLite)
+        final workspaces = await HybridStorageService.instance.getUserWorkspaces(widget.userAddress);
         setState(() {
           _workspaces = workspaces;
           _isLoading = false;
         });
+        print('✅ Loaded ${workspaces.length} workspaces (offline-capable)');
       } else {
         setState(() {
           _isLoading = false;

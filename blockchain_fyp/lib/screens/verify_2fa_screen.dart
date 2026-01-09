@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
-import 'dart:convert';
 import '../services/email_otp_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/biometric_service.dart';
 import '../services/session_service.dart';
 import '../services/distributed_service.dart';
+import '../services/hybrid_storage_service.dart';
 import '../services/invite_link_manager.dart';
 import '../services/invite_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -561,16 +561,42 @@ class _Verify2FAScreenState extends State<Verify2FAScreen>
         String channelName = 'general';
         
         try {
-           final workspaces = await DistributedService.getUserWorkspaces(widget.userAddress);
-           if (workspaces.isNotEmpty) {
-             workspaceName = workspaces.first['workspace_id'] ?? 'YourWorkspace';
-           }
+          print('🔍 Fetching workspace details for: ${widget.userAddress}');
+          final workspaces = await DistributedService.getUserWorkspaces(widget.userAddress).timeout(
+            const Duration(seconds: 6),
+            onTimeout: () => [],
+          ).catchError((e) {
+            print('⚠️ Error fetching workspace details: $e');
+            return <Map<String, dynamic>>[];
+          });
+          
+          if (workspaces.isNotEmpty) {
+            // Use workspace name (not workspace_id) for navigation
+            workspaceName = workspaces.first['name'] ?? 
+                           workspaces.first['workspaceName'] ?? 
+                           'YourWorkspace';
+            // Default channel is always "general" for all workspaces
+            channelName = 'general';
+            print('✅ Found workspace: $workspaceName, channel: $channelName');
+          } else {
+            print('⚠️ No workspaces found for user - using defaults');
+          }
         } catch (e) {
-          print('Error fetching workspace details: $e');
+          print('⚠️ Error fetching workspace details: $e');
+          // Continue with defaults
         }
         
         // Save login session to persistent storage
         await SessionService.saveLoginSession(widget.userAddress, workspaceName, channelName);
+        
+        // Initialize HybridStorageService for P2P communication
+        try {
+          print('🔄 Initializing Hybrid Storage for P2P...');
+          await HybridStorageService.instance.initialize(userAddress: widget.userAddress);
+          print('✅ Hybrid Storage initialized - P2P ready');
+        } catch (e) {
+          print('⚠️ Hybrid Storage init error: $e');
+        }
         
         // Check for pending invites
         final pendingInvite = await InviteLinkManager.instance.consumePendingInvite();

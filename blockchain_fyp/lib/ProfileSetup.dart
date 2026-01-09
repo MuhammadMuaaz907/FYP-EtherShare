@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:email_validator/email_validator.dart';
 import 'screens/setup_2fa_screen.dart';
 import 'services/secure_storage_service.dart';
@@ -61,14 +60,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         return;
       }
       
-      // Fallback: Try loading from SharedPreferences
-      final prefs = await SharedPreferences.getInstance();
-      setState(() {
-        _firstNameController.text = prefs.getString('firstName') ?? '';
-        _lastNameController.text = prefs.getString('lastName') ?? '';
-        _emailController.text = prefs.getString('email') ?? '';
-        _designationController.text = prefs.getString('designation') ?? '';
-      });
+      // No fallback to local storage - data must come from backend database
+      print('ℹ️ No existing profile found in database');
     } catch (e) {
       print('⚠️ Error loading existing profile: $e');
     }
@@ -131,11 +124,14 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       
       // Only check if username is different from current
       if (currentUsername.toLowerCase() != fullName.toLowerCase()) {
-        // Check if username is available
+        // Check if username is available (test save with all fields)
         final testResult = await DistributedService.saveUserProfile(
           address: widget.address,
           username: fullName,
           email: _emailController.text.trim(),
+          firstName: _firstNameController.text.trim(),
+          lastName: _lastNameController.text.trim(),
+          designation: _designationController.text.trim(),
         );
         
         if (testResult['isDuplicate'] == true) {
@@ -168,40 +164,56 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       // Combine first and last name for username (backward compatibility)
       final fullName = '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}'.trim();
       
-      // Always save to local storage first (offline support)
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('username', fullName);
-      await prefs.setString('firstName', _firstNameController.text.trim());
-      await prefs.setString('lastName', _lastNameController.text.trim());
-      await prefs.setString('designation', _designationController.text.trim());
-      await prefs.setString('email', _emailController.text.trim());
-      
-      // Store email securely for 2FA
+      // Store email securely for 2FA (only secure storage, not local preferences)
       if (_emailController.text.trim().isNotEmpty && _storageService != null) {
         await _storageService!.storeSecureData('2fa_email', _emailController.text.trim());
         print('✅ Email stored securely for 2FA: ${_emailController.text.trim()}');
       }
       
-      print('✅ Profile saved to local storage');
-      
-      // Try to save to Distributed System (backend)
+      // Save to backend database (primary storage - no local storage) with all profile fields
       final result = await DistributedService.saveUserProfile(
         address: widget.address,
         username: fullName,
         email: _emailController.text.trim(),
+        firstName: _firstNameController.text.trim(),
+        lastName: _lastNameController.text.trim(),
+        designation: _designationController.text.trim(),
       );
       
       if (result['success'] == true) {
-        print('✅ Profile saved successfully to MongoDB');
+        print('✅ Profile saved successfully to MongoDB database');
+        print('✅ All profile data stored: firstName, lastName, email, designation');
+        
+        // Verify profile was saved correctly by fetching it back
+        try {
+          final verifyProfile = await DistributedService.getUserProfile(widget.address).timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => null,
+          );
+          
+          if (verifyProfile != null) {
+            print('✅ Profile verification successful - data confirmed in database');
+            print('   Username: ${verifyProfile['username']}');
+            print('   Email: ${verifyProfile['email']}');
+            if (verifyProfile['firstName'] != null) print('   First Name: ${verifyProfile['firstName']}');
+            if (verifyProfile['lastName'] != null) print('   Last Name: ${verifyProfile['lastName']}');
+          } else {
+            print('⚠️ Profile saved but verification failed - may need to retry');
+          }
+        } catch (e) {
+          print('⚠️ Profile verification error (non-critical): $e');
+        }
         
         setState(() {
           _isLoading = false;
           _status = 'Profile saved successfully!';
         });
         
+        // Small delay to show success message
+        await Future.delayed(const Duration(milliseconds: 800));
+        
         // Navigate to 2FA setup only if show2FASetup is true (onboarding flow)
         if (widget.show2FASetup) {
-          await Future.delayed(const Duration(milliseconds: 500));
           if (mounted) {
             Navigator.pushReplacement(
               context,
@@ -215,7 +227,6 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           }
         } else {
           // For edit mode, just pop back to profile page
-          await Future.delayed(const Duration(milliseconds: 500));
           if (mounted) {
             Navigator.pop(context, true); // Return true to indicate success
           }
@@ -228,69 +239,45 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         print('⚠️ Failed to save profile to MongoDB: $errorMsg');
         print('✅ Profile saved locally - will sync when backend is available');
         
-        // Show user-friendly message
+        // Backend save failed - show error and retry option
+        // Don't proceed without backend save - data must be in database
         String userMessage;
         if (isNetworkError) {
-          userMessage = 'Profile saved locally!\n\n'
-              '⚠️ Could not connect to server.\n'
-              'Your profile is saved on this device and will sync when the server is available.\n\n'
-              'To fix:\n'
-              '1. Ensure backend server is running\n'
-              '2. Check your network connection\n'
-              '3. Verify PC IP address is correct';
+          userMessage = '⚠️ Could not connect to server.\n\n'
+              'Your profile must be saved to the database to continue.\n\n'
+              'Please check:\n'
+              '1. Backend server is running (cd backend && npm run dev)\n'
+              '2. Your network connection\n'
+              '3. PC IP address is correct\n\n'
+              'Click Retry to try again.';
         } else {
-          userMessage = 'Profile saved locally!\n\n'
-              '⚠️ Server error: $errorMsg\n'
-              'Your profile is saved on this device.';
+          userMessage = '⚠️ Server error: $errorMsg\n\n'
+              'Your profile could not be saved to the database.\n'
+              'Please try again or contact support.';
         }
         
-        // Show dialog with option to continue or retry
+        // Show dialog with retry option
         if (mounted) {
-          final shouldContinue = await showDialog<bool>(
+          final shouldRetry = await showDialog<bool>(
             context: context,
+            barrierDismissible: false,
             builder: (context) => AlertDialog(
-              title: const Text('Profile Saved Locally'),
+              title: const Text('Profile Save Failed'),
               content: Text(userMessage),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(context, false), // Retry
+                  onPressed: () => Navigator.pop(context, true), // Retry
                   child: const Text('Retry'),
                 ),
                 TextButton(
-                  onPressed: () => Navigator.pop(context, true), // Continue
-                  child: const Text('Continue'),
+                  onPressed: () => Navigator.pop(context, false), // Cancel
+                  child: const Text('Cancel'),
                 ),
               ],
             ),
           );
           
-          if (shouldContinue == true) {
-            // User chose to continue - proceed with navigation
-            setState(() {
-              _isLoading = false;
-              _status = 'Profile saved locally';
-            });
-            
-            if (widget.show2FASetup) {
-              await Future.delayed(const Duration(milliseconds: 500));
-              if (mounted) {
-                Navigator.pushReplacement(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => Setup2FAScreen(
-                      userId: widget.address,
-                      preFilledEmail: _emailController.text.trim(),
-                    ),
-                  ),
-                );
-              }
-            } else {
-              await Future.delayed(const Duration(milliseconds: 500));
-              if (mounted) {
-                Navigator.pop(context, true);
-              }
-            }
-          } else {
+          if (shouldRetry == true) {
             // User chose to retry - call save again
             setState(() {
               _isLoading = false;
@@ -298,6 +285,12 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
             });
             await Future.delayed(const Duration(milliseconds: 500));
             await _saveProfile(); // Retry
+          } else {
+            // User cancelled - reset loading state
+            setState(() {
+              _isLoading = false;
+              _status = 'Profile save cancelled. Please try again.';
+            });
           }
         }
       }

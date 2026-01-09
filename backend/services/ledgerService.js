@@ -11,6 +11,8 @@ class LedgerService {
    * Add a new block to the ledger chain
    */
   static async addBlock(nodeId, transactionData) {
+    const startTime = process.hrtime.bigint(); // Start timing
+    
     try {
       // Get last block for this node
       const lastBlock = await Ledger.findOne({ node_id: nodeId })
@@ -20,12 +22,7 @@ class LedgerService {
       const blockNumber = lastBlock ? lastBlock.block_number + 1 : 0;
       const previousHash = lastBlock ? lastBlock.current_hash : '0';
       
-      // Calculate gas for transaction (blockchain-like)
-      const gasUsed = GasCalculator.calculateTransactionGas(transactionData);
-      const gasPrice = GasCalculator.getCurrentGasPrice();
-      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
-      
-      // Create block data
+      // Create block data (before gas calculation)
       const blockData = {
         block_number: blockNumber,
         node_id: nodeId,
@@ -35,15 +32,12 @@ class LedgerService {
         receiver_address: transactionData.receiver_address,
         workspace_id: transactionData.workspace_id,
         timestamp: Date.now(),
-        previous_hash: previousHash,
-        gas_used: gasUsed,
-        gas_price: gasPrice,
-        transaction_fee: transactionFee
+        previous_hash: previousHash
       };
       
-      // Calculate current hash (blockchain-like)
+      // Calculate current hash (blockchain-like) - before gas calculation
       const dataString = JSON.stringify(blockData.data, Object.keys(blockData.data).sort());
-      const combined = `${dataString}${previousHash}${blockNumber}${nodeId}${gasUsed}${transactionFee}`;
+      const combined = `${dataString}${previousHash}${blockNumber}${nodeId}`;
       const currentHash = crypto.createHash('sha256').update(combined, 'utf8').digest('hex');
       
       blockData.current_hash = currentHash;
@@ -53,7 +47,23 @@ class LedgerService {
       const block = new Ledger(blockData);
       await block.save();
       
-      console.log(`✅ Block added to ledger: ${blockData.block_id}`);
+      // Calculate execution time and gas
+      const endTime = process.hrtime.bigint();
+      const executionTimeMs = Number(endTime - startTime) / 1000000; // Convert nanoseconds to milliseconds
+      
+      // Calculate gas based on execution time
+      const gasUsed = GasCalculator.calculateTransactionGas(executionTimeMs, transactionData);
+      const gasPrice = GasCalculator.getCurrentGasPrice();
+      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+      
+      // Update block with gas information
+      block.gas_used = gasUsed;
+      block.gas_price = gasPrice;
+      block.transaction_fee = transactionFee;
+      block.transaction_time_ms = Math.round(executionTimeMs * 100) / 100;
+      await block.save();
+      
+      console.log(`✅ Block added to ledger: ${blockData.block_id} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
       
       // Verify chain integrity
       const isValid = await this.verifyChain(nodeId);
@@ -67,7 +77,14 @@ class LedgerService {
       
       return block;
     } catch (error) {
-      console.error('❌ Add block error:', error);
+      // Calculate gas even on error
+      const endTime = process.hrtime.bigint();
+      const executionTimeMs = Number(endTime - startTime) / 1000000;
+      const gasUsed = GasCalculator.calculateTransactionGas(executionTimeMs, transactionData);
+      const gasPrice = GasCalculator.getCurrentGasPrice();
+      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+      
+      console.error(`❌ Add block error: ${error.message} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
       throw error;
     }
   }

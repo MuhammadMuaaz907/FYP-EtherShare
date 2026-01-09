@@ -11,12 +11,15 @@ const membersRoutes = require('./routes/members');
 const filesRoutes = require('./routes/files');
 const nodesRoutes = require('./routes/nodes');
 const channelsRoutes = require('./routes/channels');
+const peersRoutes = require('./routes/peers');
 
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
+// CORS Configuration: Allow all origins (including Cloudflare Tunnel)
+// For production, set CORS_ORIGIN in .env to specific domains
 app.use(cors({
   origin: process.env.CORS_ORIGIN?.split(',') || '*',
   credentials: true
@@ -49,6 +52,7 @@ app.use('/api/members', membersRoutes);
 app.use('/api/files', filesRoutes);
 app.use('/api/nodes', nodesRoutes);
 app.use('/api/channels', channelsRoutes);
+app.use('/api/peers', peersRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -114,20 +118,41 @@ async function startServer() {
     // Start Express server on all interfaces (0.0.0.0) to allow network access
     // This allows connections from:
     // - localhost (127.0.0.1)
-    // - local network IP (192.168.0.34)
+    // - local network IP (192.168.0.35)
     // - Android emulator (10.0.2.2)
     app.listen(PORT, '0.0.0.0', () => {
-      console.log('\n' + '='.repeat(50));
+      console.log('\n' + '='.repeat(60));
       console.log('🚀 EtherShare Backend Server Started');
-      console.log('='.repeat(50));
+      console.log('='.repeat(60));
       console.log(`📍 Local: http://localhost:${PORT}`);
       console.log(`🌐 Network: http://${localIP}:${PORT}`);
       console.log(`📱 Android Emulator: http://10.0.2.2:${PORT}`);
       console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`💾 Database: ${database.isConnected() ? 'Connected ✅' : 'Disconnected ❌'}`);
-      console.log('='.repeat(50));
-      console.log('💡 For real Android device, use network IP in Flutter app');
-      console.log('='.repeat(50) + '\n');
+      console.log('='.repeat(60));
+      console.log('💡 For real Android device, use network IP in Flutter app:');
+      console.log(`   DistributedService.setRealDeviceHost('${localIP}');`);
+      console.log('='.repeat(60));
+      console.log('🌐 Cloudflare Tunnel (if configured):');
+      console.log('   Set BACKEND_URL in blockchain_fyp/.env to your tunnel URL');
+      console.log('   Example: BACKEND_URL=https://your-tunnel.trycloudflare.com');
+      console.log('='.repeat(60));
+      console.log('⚠️  IMPORTANT: If IP changes, update Flutter app IP address!');
+      console.log('='.repeat(60) + '\n');
+      
+      // Verify server is actually listening
+      const net = require('net');
+      const testSocket = new net.Socket();
+      testSocket.setTimeout(1000);
+      testSocket.on('connect', () => {
+        console.log('✅ Server verified: Port is listening and accessible');
+        testSocket.destroy();
+      });
+      testSocket.on('error', () => {
+        console.log('⚠️  Warning: Port might not be accessible from network');
+        console.log('   Check Windows Firewall settings');
+      });
+      testSocket.connect(PORT, 'localhost');
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

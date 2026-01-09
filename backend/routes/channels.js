@@ -3,6 +3,7 @@ const router = express.Router();
 const { getCollection } = require('../utils/db');
 const { optionalAuth } = require('../middleware/auth');
 const HashChain = require('../utils/hashChain');
+const GasCalculator = require('../utils/gasCalculator');
 
 /**
  * @route   POST /api/channels
@@ -10,6 +11,8 @@ const HashChain = require('../utils/hashChain');
  * @access  Public (add auth later)
  */
 router.post('/', optionalAuth, async (req, res) => {
+  const startTime = process.hrtime.bigint(); // Start timing
+  
   try {
     const channelsCollection = getCollection('channels');
     const { workspaceId, channelId, channelName, creatorAddress, isPrivate = false } = req.body;
@@ -101,10 +104,38 @@ router.post('/', optionalAuth, async (req, res) => {
     // Insert channel
     await channelsCollection.insertOne(channelWithHash);
     
-    console.log(`✅ Channel created: ${normalizedChannelId} in workspace ${workspaceId}`);
+    // Calculate execution time and gas
+    const endTime = process.hrtime.bigint();
+    const executionTimeMs = Number(endTime - startTime) / 1000000; // Convert nanoseconds to milliseconds
+    
+    // Calculate gas based on execution time
+    const gasUsed = GasCalculator.calculateChannelGas(executionTimeMs, channelData);
+    const gasPrice = GasCalculator.getCurrentGasPrice();
+    const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+    
+    // Update channel with gas information
+    await channelsCollection.updateOne(
+      { channel_id: normalizedChannelId, workspace_id: workspaceId },
+      {
+        $set: {
+          gas_used: gasUsed,
+          gas_price: gasPrice,
+          transaction_fee: transactionFee,
+          transaction_time_ms: Math.round(executionTimeMs * 100) / 100
+        }
+      }
+    );
+    
+    console.log(`✅ Channel created: ${normalizedChannelId} in workspace ${workspaceId} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
     
     // Remove internal fields from response
     const { _id, previous_hash, current_hash, ...cleanChannel } = channelWithHash;
+    
+    // Add gas info to response
+    cleanChannel.gas_used = gasUsed;
+    cleanChannel.gas_price = gasPrice;
+    cleanChannel.transaction_fee = transactionFee;
+    cleanChannel.transaction_time_ms = Math.round(executionTimeMs * 100) / 100;
     
     return res.status(201).json({
       success: true,
@@ -112,11 +143,22 @@ router.post('/', optionalAuth, async (req, res) => {
       data: cleanChannel
     });
   } catch (error) {
-    console.error('❌ Create channel error:', error);
+    // Calculate gas even on error
+    const endTime = process.hrtime.bigint();
+    const executionTimeMs = Number(endTime - startTime) / 1000000;
+    const gasUsed = GasCalculator.calculateChannelGas(executionTimeMs, req.body);
+    const gasPrice = GasCalculator.getCurrentGasPrice();
+    const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+    
+    console.error(`❌ Create channel error: ${error.message} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
     return res.status(500).json({
       success: false,
       error: 'Failed to create channel',
-      message: error.message
+      message: error.message,
+      gas_used: gasUsed,
+      gas_price: gasPrice,
+      transaction_fee: transactionFee,
+      transaction_time_ms: Math.round(executionTimeMs * 100) / 100
     });
   }
 });
@@ -139,18 +181,40 @@ router.get('/workspace/:workspaceId', optionalAuth, async (req, res) => {
     };
     
     // If member address provided, filter channels accessible to this member
+    // But show ALL channels if user is a workspace member (workspace members should see all channels)
     if (memberAddress) {
       const memberAddr = memberAddress.toLowerCase().trim();
-      query = {
+      
+      // Check if user is a workspace member
+      const membersCollection = getCollection('members');
+      const isWorkspaceMember = await membersCollection.findOne({
         workspace_id: workspaceId,
-        deleted: { $ne: true },
-        $or: [
-          { is_default: true }, // Default channels are accessible to all
-          { is_private: false }, // Public channels
-          { members: { $in: [memberAddr] } }, // Member is in members list
-          { members: { $size: 0 } } // Empty members array means all workspace members
-        ]
-      };
+        member_address: memberAddr
+      });
+      
+      // If user is a workspace member, show ALL channels (except deleted)
+      // Workspace members should have access to all channels in their workspace
+      if (isWorkspaceMember) {
+        // Show all channels for workspace members
+        query = {
+          workspace_id: workspaceId,
+          deleted: { $ne: true }
+        };
+        console.log(`✅ User ${memberAddr} is workspace member - showing all channels`);
+      } else {
+        // If not a workspace member, use restrictive filter
+        query = {
+          workspace_id: workspaceId,
+          deleted: { $ne: true },
+          $or: [
+            { is_default: true }, // Default channels are accessible to all
+            { is_private: false }, // Public channels
+            { members: { $in: [memberAddr] } }, // Member is in members list
+            { members: { $size: 0 } } // Empty members array means all workspace members
+          ]
+        };
+        console.log(`⚠️ User ${memberAddr} is not workspace member - using restrictive filter`);
+      }
     }
     
     let channels = await channelsCollection
@@ -245,8 +309,12 @@ router.get('/workspace/:workspaceId', optionalAuth, async (req, res) => {
       return rest;
     });
     
-    console.log(`✅ Retrieved ${cleanChannels.length} channels for workspace ${workspaceId}`);
+    console.log(`✅ Retrieved ${cleanChannels.length} channels for workspace ${workspaceId}${memberAddress ? ` (filtered for member: ${memberAddress})` : ''}`);
     console.log(`📋 Channel order: ${cleanChannels.map(ch => ch.channel_name || ch.channel_id).join(' → ')}`);
+    console.log(`📊 Channel details:`);
+    cleanChannels.forEach(ch => {
+      console.log(`   - ${ch.channel_name || ch.channel_id} (${ch.is_default ? 'default' : ch.is_private ? 'private' : 'public'}, members: ${(ch.members || []).length})`);
+    });
     
     return res.json({
       success: true,

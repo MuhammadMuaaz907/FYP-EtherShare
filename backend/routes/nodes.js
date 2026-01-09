@@ -34,7 +34,9 @@ router.post('/register', async (req, res) => {
         previous_hash: node.previous_hash,
         current_hash: node.current_hash,
         gas_used: node.gas_used,
+        gas_price: node.gas_price,
         transaction_fee: node.transaction_fee,
+        transaction_time_ms: node.transaction_time_ms,
         chain_valid: chainValid
       }
     });

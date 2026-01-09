@@ -8,6 +8,7 @@ import 'ProfileSetup.dart';
 import 'services/contract_service.dart';
 import 'services/session_service.dart';
 import 'services/distributed_service.dart';
+import 'services/hybrid_storage_service.dart';
 import 'workspace_home_page.dart';
 import 'dart:convert';
 import 'services/invite_link_manager.dart';
@@ -205,6 +206,15 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               
               // Save login session
               await SessionService.saveLoginSession(address, workspaceName, channelName);
+              
+              // Initialize HybridStorageService for P2P communication
+              try {
+                print('🔄 Initializing Hybrid Storage for P2P...');
+                await HybridStorageService.instance.initialize(userAddress: address);
+                print('✅ Hybrid Storage initialized - P2P ready');
+              } catch (e) {
+                print('⚠️ Hybrid Storage init error: $e');
+              }
 
                 final pendingInvite =
                     await InviteLinkManager.instance.consumePendingInvite();

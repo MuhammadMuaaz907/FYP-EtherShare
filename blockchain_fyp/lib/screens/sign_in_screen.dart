@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:provider/provider.dart';
@@ -84,11 +85,12 @@ class _SignInScreenState extends State<SignInScreen> {
       final credentials = EthPrivateKey.fromHex(
         privateKey.startsWith('0x') ? privateKey.substring(2) : privateKey,
       );
-      final address = credentials.address.hex;
+      // Normalize address to lowercase for consistent database lookups
+      final address = credentials.address.hex.toLowerCase();
       
       print('🔐 Starting sign-in process for address: $address');
       
-      // Step 1: Check registration with timeout
+      // Step 1: Check if user exists in backend database first (primary check)
       if (!mounted) {
         _isProcessing = false;
         return;
@@ -98,60 +100,231 @@ class _SignInScreenState extends State<SignInScreen> {
         _status = 'Verifying account...';
       });
       
-      final isRegistered = await contractService.isRegistered(address).timeout(
-        const Duration(seconds: 12),
-        onTimeout: () {
-          throw TimeoutException('Connection timeout. Please check your network connection.');
-        },
-      );
+      // Step 1: Check backend server health first
+      _safeSetState(() {
+        _status = 'Connecting to server...';
+      });
+      
+      bool backendReachable = false;
+      try {
+        print('🔍 Checking backend server health...');
+        backendReachable = await DistributedService.checkHealth().timeout(
+          const Duration(seconds: 4),
+          onTimeout: () {
+            print('⏱️ Backend health check timed out');
+            return false;
+          },
+        ).catchError((e) {
+          print('⚠️ Backend health check error: $e');
+          return false;
+        });
+        
+        if (backendReachable) {
+          print('✅ Backend server is reachable');
+        } else {
+          print('❌ Backend server is unreachable');
+        }
+      } catch (e) {
+        print('❌ Error checking backend health: $e');
+        backendReachable = false;
+      }
       
       if (!mounted) {
         _isProcessing = false;
         return;
       }
       
-      if (!isRegistered) {
+      // Step 2: Check backend database if server is reachable
+      Map<String, dynamic>? backendProfile;
+      bool isNetworkError = false;
+      
+      if (backendReachable) {
+        try {
+          print('🔍 Checking backend database for address: $address');
+          _safeSetState(() {
+            _status = 'Verifying account...';
+          });
+          
+          backendProfile = await DistributedService.getUserProfile(address).timeout(
+            const Duration(seconds: 6),
+            onTimeout: () {
+              print('⏱️ Backend profile check timed out');
+              return null;
+            },
+          ).catchError((e) {
+            print('⚠️ Backend profile check error: $e');
+            // Check if it's a network error
+            if (e is SocketException || e.toString().contains('SocketException') || 
+                e.toString().contains('No route to host') || 
+                e.toString().contains('Connection refused')) {
+              isNetworkError = true;
+            }
+            return null;
+          });
+          
+          if (backendProfile != null) {
+            print('✅ Backend profile found:');
+            print('   - Address: ${backendProfile['address']}');
+            print('   - Username: ${backendProfile['username']}');
+            print('   - Email: ${backendProfile['email']}');
+            print('   - First Name: ${backendProfile['firstName'] ?? "N/A"}');
+            print('   - Last Name: ${backendProfile['lastName'] ?? "N/A"}');
+            print('   - All keys: ${backendProfile.keys.toList()}');
+          } else {
+            print('❌ Backend profile not found for address: $address');
+            if (isNetworkError) {
+              print('⚠️ Network error detected during profile fetch');
+            }
+          }
+        } catch (e) {
+          print('❌ Error checking backend profile: $e');
+          backendProfile = null;
+          if (e is SocketException || e.toString().contains('SocketException') || 
+              e.toString().contains('No route to host')) {
+            isNetworkError = true;
+          }
+        }
+      } else {
+        // Backend is not reachable - this is a network/server issue
+        print('❌ Backend server is not reachable - cannot verify profile');
+        isNetworkError = true;
+      }
+      
+      if (!mounted) {
+        _isProcessing = false;
+        return;
+      }
+      
+      // Step 3: Handle different scenarios
+      if (backendProfile != null) {
+        // User exists in backend database - proceed with sign-in
+        print('✅ User found in backend database - proceeding with sign-in');
+        // Continue to profile/workspace check below
+      } else if (isNetworkError || !backendReachable) {
+        // Backend is unreachable - show error and don't redirect to profile setup
+        print('❌ Backend server unreachable - cannot verify account');
         _isProcessing = false;
         _safeSetState(() {
-          _status = 'Account not found. Please sign up first.';
+          _status = 'Cannot connect to server. Please check:\n1. Backend server is running\n2. Device and PC are on same network\n3. Firewall allows port 3000';
           _isLoading = false;
         });
         return;
+      } else {
+        // Backend is reachable but user doesn't exist - check blockchain as fallback
+        _safeSetState(() {
+          _status = 'Checking blockchain registration...';
+        });
+        
+        final isRegistered = await contractService.isRegistered(address).timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => false,
+        ).catchError((e) {
+          print('⚠️ Blockchain check error: $e');
+          return false;
+        });
+        
+        if (!mounted) {
+          _isProcessing = false;
+          return;
+        }
+        
+        if (!isRegistered) {
+          // User doesn't exist anywhere - need to sign up
+          _isProcessing = false;
+          _safeSetState(() {
+            _status = 'Account not found. Please sign up first.';
+            _isLoading = false;
+          });
+          return;
+        } else {
+          // User exists on blockchain but not in backend - incomplete setup
+          print('⚠️ User registered on blockchain but profile not in backend database');
+          _isProcessing = false;
+          _safeSetState(() {
+            _status = 'You are already signed up. Please complete your profile setup.';
+            _isLoading = false;
+          });
+          
+          // Navigate to profile setup after a short delay
+          await Future.delayed(const Duration(milliseconds: 1500));
+          if (mounted) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ProfileSetupScreen(
+                  address: address,
+                  show2FASetup: true,
+                ),
+              ),
+            );
+          }
+          return;
+        }
       }
       
-      // Step 2: Check profile and workspace in parallel for better performance
+      // Step 2: User exists in backend - check profile completeness and workspace membership
       _safeSetState(() {
-        _status = 'Checking profile...';
+        _status = 'Loading your workspace...';
       });
       
-      bool hasProfile = false;
-      bool workspaceExists = false;
+      // Since user exists in backend, check if profile is complete
+      bool hasCompleteProfile = false;
+      bool hasWorkspaceMembership = false;
+      List<Map<String, dynamic>> userWorkspaces = [];
       
-      // Run profile and workspace checks in parallel
+      // Check profile completeness from backend data
+      // backendProfile is guaranteed to be non-null here since we're in the "exists" branch
+      final username = backendProfile['username']?.toString().trim();
+      final email = backendProfile['email']?.toString().trim();
+      
+      // Profile is complete if username and email exist and are not empty
+      // firstName, lastName, designation are optional but username and email are required
+      hasCompleteProfile = username != null && 
+                          username.isNotEmpty && 
+                          email != null && 
+                          email.isNotEmpty;
+      
+      print('📋 Profile completeness check:');
+      print('   - Username: "${username ?? "MISSING"}" (length: ${username != null ? username.length : 0})');
+      print('   - Email: "${email ?? "MISSING"}" (length: ${email != null ? email.length : 0})');
+      print('   - First Name: ${backendProfile['firstName'] ?? "optional"}');
+      print('   - Last Name: ${backendProfile['lastName'] ?? "optional"}');
+      print('   - Username is not null: ${username != null}');
+      print('   - Username is not empty: ${username != null && username.isNotEmpty}');
+      print('   - Email is not null: ${email != null}');
+      print('   - Email is not empty: ${email != null && email.isNotEmpty}');
+      print('   - Result: ${hasCompleteProfile ? "✅ COMPLETE" : "❌ INCOMPLETE"}');
+      
+      // Check workspace membership (user can be creator OR member)
       try {
-        final results = await Future.wait<bool>([
-          contractService.hasCompletedProfile(address).timeout(
-            const Duration(seconds: 8),
-            onTimeout: () => false,
-          ).catchError((e) {
-            print('⚠️ Profile check error: $e');
-            return false;
-          }),
-          contractService.doesWorkspaceExist(address).timeout(
-            const Duration(seconds: 8),
-            onTimeout: () => false,
-          ).catchError((e) {
-            print('⚠️ Workspace check error: $e');
-            return false;
-          }),
-        ]);
+        print('🔍 Checking workspace membership for: $address');
+        userWorkspaces = await DistributedService.getUserWorkspaces(address).timeout(
+          const Duration(seconds: 6),
+          onTimeout: () {
+            print('⏱️ Workspace check timed out');
+            return <Map<String, dynamic>>[];
+          },
+        ).catchError((e) {
+          print('⚠️ Workspace check error: $e');
+          return <Map<String, dynamic>>[];
+        });
         
-        hasProfile = results[0];
-        workspaceExists = results[1];
+        hasWorkspaceMembership = userWorkspaces.isNotEmpty;
+        
+        if (hasWorkspaceMembership) {
+          print('✅ User has workspace membership: ${userWorkspaces.length} workspace(s)');
+          for (var ws in userWorkspaces) {
+            print('   - Workspace: ${ws['name'] ?? ws['workspaceName'] ?? "Unknown"} (ID: ${ws['workspace_id'] ?? ws['workspaceId']})');
+            print('     Keys: ${ws.keys.toList()}');
+          }
+        } else {
+          print('⚠️ User has no workspace membership (empty array returned)');
+        }
       } catch (e) {
-        print('⚠️ Error checking profile/workspace: $e');
-        hasProfile = false;
-        workspaceExists = false;
+        print('❌ Error checking workspace membership: $e');
+        print('   Error type: ${e.runtimeType}');
+        hasWorkspaceMembership = false;
+        userWorkspaces = [];
       }
       
       if (!mounted) {
@@ -159,17 +332,20 @@ class _SignInScreenState extends State<SignInScreen> {
         return;
       }
       
-      print('🔍 Sign In Debug Info:');
-      print('  - isRegistered: $isRegistered');
-      print('  - hasProfile: $hasProfile');
-      print('  - workspaceExists: $workspaceExists');
+      print('🔍 Sign In Debug Summary:');
+      print('  - Backend Profile: ✅ EXISTS');
+      print('  - hasCompleteProfile: ${hasCompleteProfile ? "✅ YES" : "❌ NO"}');
+      print('  - hasWorkspaceMembership: ${hasWorkspaceMembership ? "✅ YES" : "❌ NO"}');
+      print('  - Workspace Count: ${userWorkspaces.length}');
+      print('  - Next Action: ${hasCompleteProfile && hasWorkspaceMembership ? "→ Proceed to 2FA/Workspace Home" : hasCompleteProfile ? "→ Create Workspace" : "→ Complete Profile"}');
       
       // Step 3: Handle incomplete profile/workspace
-      if (!hasProfile || !workspaceExists) {
-        print('⚠️ User registered but profile/workspace incomplete');
+      if (!hasCompleteProfile) {
+        print('❌ DECISION: User exists but profile incomplete - redirecting to profile setup');
+        print('   Reason: Username="${username ?? "null"}", Email="${email ?? "null"}"');
         _isProcessing = false;
         _safeSetState(() {
-          _status = 'Completing setup...';
+          _status = 'Completing profile setup...';
           _isLoading = false;
         });
         
@@ -186,6 +362,33 @@ class _SignInScreenState extends State<SignInScreen> {
         }
         return;
       }
+      
+      if (!hasWorkspaceMembership) {
+        print('❌ DECISION: User profile complete but no workspace membership - redirecting to workspace creation');
+        _isProcessing = false;
+        _safeSetState(() {
+          _status = 'Creating workspace...';
+          _isLoading = false;
+        });
+        
+        // Navigate to workspace creation screen
+        if (mounted) {
+          // Import and navigate to workspace creation screen
+          // For now, redirect to profile setup which will lead to workspace creation
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ProfileSetupScreen(
+                address: address,
+                show2FASetup: false, // Don't show 2FA setup, just complete profile if needed
+              ),
+            ),
+          );
+        }
+        return;
+      }
+      
+      print('✅ DECISION: Profile complete AND workspace membership exists - proceeding to 2FA check');
       
       // Step 4: Check 2FA status
       _safeSetState(() {
@@ -218,32 +421,19 @@ class _SignInScreenState extends State<SignInScreen> {
         });
         
         if (mounted) {
-          String? userEmail;
-          try {
-            final profile = await DistributedService.getUserProfile(address).timeout(
-              const Duration(seconds: 8),
-              onTimeout: () => null,
-            ).catchError((e) {
-              print('⚠️ Error fetching user email: $e');
-              return null;
-            });
-            userEmail = profile?['email']?.toString();
-          } catch (e) {
-            print('⚠️ Error fetching user email: $e');
-          }
+          // Use backendProfile we already fetched - no need to fetch again
+          final userEmail = backendProfile['email']?.toString();
           
-          if (mounted) {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(
-                builder: (_) => Verify2FAScreen(
-                  userId: address,
-                  userAddress: address,
-                  userEmail: userEmail,
-                ),
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => Verify2FAScreen(
+                userId: address,
+                userAddress: address,
+                userEmail: userEmail,
               ),
-            );
-          }
+            ),
+          );
         }
         return;
       }
@@ -251,7 +441,7 @@ class _SignInScreenState extends State<SignInScreen> {
       // Step 6: Complete login and navigate to workspace
       print('✅ 2FA not enabled - redirecting to workspace');
       _safeSetState(() {
-        _status = 'Sign in successful! Redirecting...';
+        _status = 'Sign in successful! Loading workspace...';
         _isLoading = false;
       });
       
@@ -263,24 +453,47 @@ class _SignInScreenState extends State<SignInScreen> {
       String workspaceName = 'YourWorkspace';
       String channelName = 'general';
       
-      try {
-        final workspaces = await DistributedService.getUserWorkspaces(address).timeout(
-          const Duration(seconds: 8),
-          onTimeout: () => [],
-        ).catchError((e) {
+      // Use workspaces we already fetched in Step 2 (no need to fetch again)
+      if (userWorkspaces.isNotEmpty) {
+        // Get first workspace (user's primary workspace)
+        final workspace = userWorkspaces.first;
+        workspaceName = workspace['name'] ?? 
+                       workspace['workspaceName'] ?? 
+                       'YourWorkspace';
+        // Default channel is always "general" for all workspaces
+        channelName = 'general';
+        print('✅ Using workspace: $workspaceName, channel: $channelName');
+        print('   Workspace ID: ${workspace['workspace_id'] ?? workspace['workspaceId']}');
+      } else {
+        // Fallback: Fetch again if somehow workspaces list is empty
+        print('⚠️ Workspaces list empty, fetching again...');
+        try {
+          final workspaces = await DistributedService.getUserWorkspaces(address).timeout(
+            const Duration(seconds: 6),
+            onTimeout: () => [],
+          ).catchError((e) {
+            print('⚠️ Error fetching workspace details: $e');
+            return <Map<String, dynamic>>[];
+          });
+          
+          if (workspaces.isNotEmpty) {
+            workspaceName = workspaces.first['name'] ?? 
+                           workspaces.first['workspaceName'] ?? 
+                           'YourWorkspace';
+            channelName = 'general';
+            print('✅ Found workspace: $workspaceName, channel: $channelName');
+          } else {
+            print('⚠️ No workspaces found, using defaults');
+          }
+        } catch (e) {
           print('⚠️ Error fetching workspace details: $e');
-          return <Map<String, dynamic>>[];
-        });
-        
-        if (workspaces.isNotEmpty) {
-          workspaceName = workspaces.first['name']?.toString() ?? 'YourWorkspace';
-          channelName = workspaces.first['defaultChannel']?.toString() ?? 'general';
+          // Continue with defaults
         }
-      } catch (e) {
-        print('⚠️ Error fetching workspace details: $e');
       }
       
+      // Save login session to database for persistence
       await SessionService.saveLoginSession(address, workspaceName, channelName);
+      print('✅ Login session saved: $address -> $workspaceName / $channelName');
       
       if (mounted) {
         _isProcessing = false;

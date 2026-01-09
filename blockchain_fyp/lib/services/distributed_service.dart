@@ -24,7 +24,17 @@ class DistributedService {
   // Host configuration for different platforms
   static const String emulatorHost = '10.0.2.2'; // Android Emulator
   static const String localHost = 'localhost'; // Desktop/Web
-  static const String realDeviceHost = '192.168.0.35'; // Real Android Device - Your PC IP on local network
+  // Default IP - will try to auto-detect or use stored IP
+  static String _realDeviceHost = '192.168.0.34'; // Real Android Device - Your PC IP on local network
+  
+  /// Get real device host (with fallback)
+  static String get realDeviceHost => _realDeviceHost;
+  
+  /// Set real device host (for dynamic IP updates)
+  static void setRealDeviceHost(String ip) {
+    _realDeviceHost = ip;
+    print('🔧 Updated backend IP to: $ip');
+  }
   
   // Port for backend server
   static const int backendPort = 3000;
@@ -33,14 +43,18 @@ class DistributedService {
   static String get baseUrl {
     // If custom URL is set, use it
     if (_customBackendUrl != null) {
+      print('🔧 Using custom backend URL: $_customBackendUrl');
       return _customBackendUrl!;
     }
     
     // First, check if BACKEND_URL is set in .env
     final envUrl = dotenv.env['BACKEND_URL'];
     if (envUrl != null && envUrl.isNotEmpty) {
+      print('🌐 Using BACKEND_URL from .env: $envUrl');
       return envUrl;
     }
+    
+    print('⚠️ No BACKEND_URL in .env, using auto-detection');
     
     // Auto-detect platform and use appropriate host
     if (kIsWeb) {
@@ -65,6 +79,7 @@ class DistributedService {
           // IMPORTANT: Update realDeviceHost to your PC's IP address
           print('📱 Detected Real Android Device, using: http://$realDeviceHost:$backendPort');
           print('⚠️ Make sure your PC IP is correct and backend server is running!');
+          print('💡 Tip: If IP changed, use DistributedService.setRealDeviceHost("new_ip") to update');
           return 'http://$realDeviceHost:$backendPort';
         }
       } catch (e) {
@@ -362,17 +377,27 @@ class DistributedService {
 
   /// Check if backend is available
   /// Returns true if backend is healthy, false otherwise
-  /// Uses shorter timeout for faster failure detection
+  /// Uses longer timeout for Cloudflare Tunnel (mobile networks can be slower)
   static Future<bool> checkHealth() async {
     try {
       final url = Uri.parse('$baseUrl/health');
       print('🔍 Checking backend health at: $url');
       
-      // Reduced timeout to 3 seconds for faster failure detection
+      // Use longer timeout for Cloudflare Tunnel URLs (mobile networks can be slower)
+      // Regular localhost/network IP: 3 seconds
+      // Cloudflare Tunnel: 10 seconds (to account for mobile network latency)
+      final isCloudflareTunnel = baseUrl.contains('trycloudflare.com') || 
+                                 baseUrl.contains('cloudflare');
+      final timeoutDuration = isCloudflareTunnel 
+          ? const Duration(seconds: 10) 
+          : const Duration(seconds: 3);
+      
+      print('⏱️ Using timeout: ${timeoutDuration.inSeconds}s (${isCloudflareTunnel ? "Cloudflare Tunnel" : "Local Network"})');
+      
       final response = await http.get(url, headers: headers).timeout(
-        const Duration(seconds: 3),
+        timeoutDuration,
         onTimeout: () {
-          throw TimeoutException('Health check timeout - backend server may not be running');
+          throw TimeoutException('Health check timeout after ${timeoutDuration.inSeconds}s - backend server may not be running or network is slow');
         },
       );
 
@@ -391,18 +416,28 @@ class DistributedService {
         print('❌ Health check failed: ${response.statusCode}');
         return false;
       }
-    } on TimeoutException {
-      // Don't print verbose error messages for timeout - it's expected if backend is down
+    } on TimeoutException catch (e) {
+      // Log timeout with more details for debugging
       print('⚠️ Backend health check timeout - server may not be running at $baseUrl');
+      print('   Timeout after: ${e.toString()}');
+      print('   URL tested: $baseUrl/health');
+      print('   💡 If using Cloudflare Tunnel, check:');
+      print('      1. Tunnel is running and forwarding to localhost:3000');
+      print('      2. Backend server is running (npm run dev)');
+      print('      3. Mobile network connection is stable');
       return false;
     } on SocketException catch (e) {
       // Network errors are common - handle gracefully
       final errorMsg = e.message.isNotEmpty ? e.message : 'Connection failed';
       print('⚠️ Backend unreachable at $baseUrl - $errorMsg');
+      print('   Error details: ${e.toString()}');
+      print('   💡 Check network connection and Cloudflare Tunnel status');
       return false;
     } catch (e) {
-      // Other errors - log but don't spam
-      print('⚠️ Health check error: ${e.toString().split('\n').first}');
+      // Other errors - log with full details for debugging
+      print('⚠️ Health check error: ${e.toString()}');
+      print('   URL: $baseUrl/health');
+      print('   Error type: ${e.runtimeType}');
       return false;
     }
   }
@@ -485,10 +520,14 @@ class DistributedService {
 
   /// Save user profile (compatible with MongoDBService)
   /// Returns a map with success status and error message if failed
+  /// Now supports firstName, lastName, and designation fields
   static Future<Map<String, dynamic>> saveUserProfile({
     required String address,
     required String username,
     required String email,
+    String? firstName,
+    String? lastName,
+    String? designation,
   }) async {
     try {
       // First, check if backend is reachable
@@ -515,16 +554,33 @@ class DistributedService {
       print('   Address: $address');
       print('   Username: $username');
       print('   Email: $email');
+      if (firstName != null) print('   First Name: $firstName');
+      if (lastName != null) print('   Last Name: $lastName');
+      if (designation != null) print('   Designation: $designation');
+      
+      // Prepare request body with all fields
+      final requestBody = <String, dynamic>{
+        'address': address,
+        'username': username,
+        'email': email,
+      };
+      
+      // Add optional fields if provided
+      if (firstName != null && firstName.isNotEmpty) {
+        requestBody['firstName'] = firstName;
+      }
+      if (lastName != null && lastName.isNotEmpty) {
+        requestBody['lastName'] = lastName;
+      }
+      if (designation != null && designation.isNotEmpty) {
+        requestBody['designation'] = designation;
+      }
       
       // Add timeout to prevent hanging
       final response = await http.post(
         url,
         headers: headers,
-        body: jsonEncode({
-          'address': address,
-          'username': username,
-          'email': email,
-        }),
+        body: jsonEncode(requestBody),
       ).timeout(
         const Duration(seconds: 10),
         onTimeout: () {
@@ -763,12 +819,14 @@ class DistributedService {
           };
         }).toList();
       } else {
+        // Server error (502, 500, etc.) - throw exception to trigger SQLite fallback
         print('❌ Get workspace members failed: ${response.statusCode}');
-        return [];
+        throw Exception('Server returned status ${response.statusCode}: ${response.body}');
       }
     } catch (e) {
-      print('❌ Get workspace members error: $e');
-      return [];
+      // Network error or server error - throw to trigger SQLite fallback
+      print('❌ Error getting workspace members: $e');
+      rethrow; // Re-throw to let hybrid service handle fallback to SQLite
     }
   }
 
@@ -1063,14 +1121,14 @@ class DistributedService {
         print('📋 Channel order: ${uniqueChannels.join(" → ")}');
         return uniqueChannels;
       } else {
+        // Server error (502, 500, etc.) - throw exception to trigger SQLite fallback
         print('❌ Get workspace channels failed: ${response.statusCode}');
-        // Return default channels on error
-        return ['General', 'Random'];
+        throw Exception('Server returned status ${response.statusCode}: ${response.body}');
       }
     } catch (e) {
+      // Network error or server error - throw to trigger SQLite fallback
       print('❌ Error getting workspace channels: $e');
-      // Return default channels on error
-      return ['General', 'Random'];
+      rethrow; // Re-throw to let hybrid service handle fallback to SQLite
     }
   }
 
@@ -1099,8 +1157,26 @@ class DistributedService {
         
         final messages = List<Map<String, dynamic>>.from(data['data'] ?? []);
         
-        // Only throw exception if chain is explicitly broken AND no messages returned
-        if (!chainValid && messages.isEmpty) {
+        // Debug logging
+        print('📥 Received ${messages.length} messages from server for channel $channelId');
+        if (messages.isNotEmpty) {
+          print('📋 First message keys: ${messages.first.keys.toList()}');
+          print('📋 Sample message: ${messages.first.toString().substring(0, messages.first.toString().length > 300 ? 300 : messages.first.toString().length)}...');
+        }
+        
+        // Log chain validation status for debugging
+        if (!chainValid) {
+          print('⚠️ Chain validation failed for channel $channelId');
+          print('   Chain valid: $chainValid');
+          print('   Messages returned: ${messages.length}');
+          if (data['brokenAt'] != null) {
+            print('   Broken at: ${data['brokenAt']}');
+          }
+        }
+        
+        // If chain is broken, ALWAYS throw exception (security - hide all messages)
+        // This ensures chain broken validation is always shown to user
+        if (!chainValid) {
           throw ChainBrokenException(
             'Data integrity check failed. Messages cannot be displayed for security reasons.',
             data['brokenAt'],
@@ -1108,22 +1184,100 @@ class DistributedService {
           );
         }
         
-        // Transform ledger format to message format for compatibility
-        return messages.map((msg) {
-          // If it's from ledger, extract data
+        // Transform MongoDB message format to UI format
+        // Backend returns messages directly in the 'data' array
+        final transformed = messages.map((msg) {
+          // Messages from MongoDB have these fields:
+          // message_id, message_text, sender_address, receiver_address, timestamp, workspace_id, channel_id, etc.
+          
+          // Handle both formats: direct MongoDB messages and ledger format
           if (msg.containsKey('data') && msg['data'] is Map) {
+            // Ledger format (has nested 'data' field) - less common
             final msgData = msg['data'] as Map<String, dynamic>;
+            
+            // Convert timestamp to DateTime if needed
+            dynamic timestampValue = msg['timestamp'] ?? msgData['timestamp'];
+            DateTime timestamp;
+            if (timestampValue is DateTime) {
+              timestamp = timestampValue;
+            } else if (timestampValue is int) {
+              timestamp = DateTime.fromMillisecondsSinceEpoch(timestampValue);
+            } else if (timestampValue is String) {
+              timestamp = DateTime.tryParse(timestampValue) ?? DateTime.now();
+            } else {
+              timestamp = DateTime.now();
+            }
+            
+            final messageText = msgData['content']?.toString() ?? 
+                               msgData['message_text']?.toString() ?? 
+                               msg['message_text']?.toString() ?? '';
+            
             return {
-              'message_id': msg['block_id'] ?? msg['_id'],
-              'message_text': msgData['content'] ?? msgData['message_text'] ?? '',
-              'sender_address': msgData['sender_address'] ?? msg['sender_address'],
-              'receiver_address': msgData['receiver_address'] ?? msg['receiver_address'],
-              'timestamp': msg['timestamp'] ?? msgData['timestamp'],
+              'message_id': msg['block_id']?.toString() ?? msg['_id']?.toString() ?? msg['message_id']?.toString(),
+              'message_text': messageText,
+              'messageText': messageText,
+              'sender_address': msgData['sender_address']?.toString() ?? msg['sender_address']?.toString() ?? '',
+              'senderAddress': msgData['sender_address']?.toString() ?? msg['sender_address']?.toString() ?? '',
+              'receiver_address': msgData['receiver_address']?.toString() ?? msg['receiver_address']?.toString(),
+              'receiverAddress': msgData['receiver_address']?.toString() ?? msg['receiver_address']?.toString(),
+              'timestamp': timestamp, // Always DateTime
+              'workspace_id': msgData['workspace_id']?.toString() ?? msg['workspace_id']?.toString() ?? workspaceId,
+              'workspaceId': msgData['workspace_id']?.toString() ?? msg['workspace_id']?.toString() ?? workspaceId,
+              'channel_id': msgData['channel_id']?.toString() ?? msg['channel_id']?.toString() ?? channelId,
+              'channelId': msgData['channel_id']?.toString() ?? msg['channel_id']?.toString() ?? channelId,
+              'file_id': msgData['file_id']?.toString() ?? msg['file_id']?.toString(),
+              'fileId': msgData['file_id']?.toString() ?? msg['file_id']?.toString(),
+              'sender': msgData['sender_address']?.toString() ?? msg['sender_address']?.toString() ?? '',
+              'senderName': msgData['sender_address']?.toString() ?? msg['sender_address']?.toString() ?? '',
+              'content': messageText, // Ensure content is set
+              'type': 'text',
+              'userAddress': msgData['sender_address']?.toString() ?? msg['sender_address']?.toString() ?? '',
               ...msgData, // Include all original data
             };
+          } else {
+            // Direct MongoDB format (most common - messages are already in correct format)
+            // Convert timestamp to DateTime if needed
+            dynamic timestampValue = msg['timestamp'];
+            DateTime timestamp;
+            if (timestampValue is DateTime) {
+              timestamp = timestampValue;
+            } else if (timestampValue is int) {
+              timestamp = DateTime.fromMillisecondsSinceEpoch(timestampValue);
+            } else if (timestampValue is String) {
+              timestamp = DateTime.tryParse(timestampValue) ?? DateTime.now();
+            } else {
+              timestamp = DateTime.now();
+            }
+            
+            final messageText = msg['message_text']?.toString() ?? '';
+            
+            return {
+              'message_id': msg['message_id']?.toString() ?? msg['_id']?.toString(),
+              'message_text': messageText,
+              'messageText': messageText,
+              'sender_address': msg['sender_address']?.toString() ?? '',
+              'senderAddress': msg['sender_address']?.toString() ?? '',
+              'receiver_address': msg['receiver_address']?.toString(),
+              'receiverAddress': msg['receiver_address']?.toString(),
+              'timestamp': timestamp, // Always DateTime
+              'workspace_id': msg['workspace_id']?.toString() ?? workspaceId,
+              'workspaceId': msg['workspace_id']?.toString() ?? workspaceId,
+              'channel_id': msg['channel_id']?.toString() ?? channelId,
+              'channelId': msg['channel_id']?.toString() ?? channelId,
+              'file_id': msg['file_id']?.toString(),
+              'fileId': msg['file_id']?.toString(),
+              'sender': msg['sender_address']?.toString() ?? '',
+              'senderName': msg['sender_address']?.toString() ?? '',
+              'content': messageText, // Ensure content is set
+              'type': 'text',
+              'userAddress': msg['sender_address']?.toString() ?? '',
+              ...msg, // Include all original fields (spread at end to allow overrides)
+            };
           }
-          return msg;
         }).toList();
+        
+        print('✅ Transformed ${transformed.length} messages for UI');
+        return transformed;
       } else if (response.statusCode == 403) {
         // Chain integrity compromised
         final errorData = jsonDecode(response.body);
@@ -1178,8 +1332,19 @@ class DistributedService {
         
         final messages = List<Map<String, dynamic>>.from(data['data'] ?? []);
         
-        // Only throw exception if chain is explicitly broken AND no messages returned
-        if (!chainValid && messages.isEmpty) {
+        // Log chain validation status for debugging
+        if (!chainValid) {
+          print('⚠️ Chain validation failed for direct messages');
+          print('   Chain valid: $chainValid');
+          print('   Messages returned: ${messages.length}');
+          if (data['brokenAt'] != null) {
+            print('   Broken at: ${data['brokenAt']}');
+          }
+        }
+        
+        // If chain is broken, ALWAYS throw exception (security - hide all messages)
+        // This ensures chain broken validation is always shown to user
+        if (!chainValid) {
           throw ChainBrokenException(
             'Data integrity check failed. Messages cannot be displayed for security reasons.',
             data['brokenAt'],
@@ -1187,21 +1352,38 @@ class DistributedService {
           );
         }
         
-        // Transform to MongoDBService format
+        // Transform MongoDB message format to UI format
+        // Backend returns messages directly (not wrapped in 'data' field)
         return messages.map((msg) {
-          // If it's from ledger, extract data
+          // Handle both formats: direct MongoDB messages and ledger format
           if (msg.containsKey('data') && msg['data'] is Map) {
+            // Ledger format (has nested 'data' field)
             final msgData = msg['data'] as Map<String, dynamic>;
             return {
-              'message_id': msg['block_id'] ?? msg['_id'],
-              'message_text': msgData['content'] ?? msgData['message_text'] ?? '',
-              'sender_address': msgData['sender_address'] ?? msg['sender_address'],
+              'message_id': msg['block_id'] ?? msg['_id'] ?? msg['message_id'],
+              'message_text': msgData['content'] ?? msgData['message_text'] ?? msg['message_text'] ?? '',
+              'messageText': msgData['content'] ?? msgData['message_text'] ?? msg['message_text'] ?? '',
+              'sender_address': msgData['sender_address'] ?? msg['sender_address'] ?? '',
+              'senderAddress': msgData['sender_address'] ?? msg['sender_address'] ?? '',
               'receiver_address': msgData['receiver_address'] ?? msg['receiver_address'],
+              'receiverAddress': msgData['receiver_address'] ?? msg['receiver_address'],
               'timestamp': msg['timestamp'] ?? msgData['timestamp'],
               ...msgData, // Include all original data
             };
+          } else {
+            // Direct MongoDB format (messages are already in correct format)
+            return {
+              'message_id': msg['message_id'] ?? msg['_id']?.toString(),
+              'message_text': msg['message_text'] ?? '',
+              'messageText': msg['message_text'] ?? '',
+              'sender_address': msg['sender_address'] ?? '',
+              'senderAddress': msg['sender_address'] ?? '',
+              'receiver_address': msg['receiver_address'],
+              'receiverAddress': msg['receiver_address'],
+              'timestamp': msg['timestamp'],
+              ...msg, // Include all original fields
+            };
           }
-          return msg;
         }).toList();
       } else if (response.statusCode == 403) {
         // Chain integrity compromised
@@ -1345,18 +1527,153 @@ class DistributedService {
 
   /// Connect to backend (compatible with MongoDBService.connect())
   /// Non-blocking: Returns false if backend is unavailable but doesn't throw
+  /// Register peer info for P2P communication
+  static Future<bool> registerPeer({
+    required String userAddress,
+    required String ipAddress,
+    required int port,
+  }) async {
+    try {
+      final url = Uri.parse('$baseUrl/api/peers/register');
+      
+      final response = await http.post(
+        url,
+        headers: headers,
+        body: jsonEncode({
+          'user_address': userAddress,
+          'ip_address': ipAddress,
+          'port': port,
+        }),
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        print('✅ Peer registered: $userAddress -> $ipAddress:$port');
+        return true;
+      } else {
+        print('❌ Peer registration failed: ${response.statusCode}');
+        return false;
+      }
+    } catch (e) {
+      print('❌ Register peer error: $e');
+      return false;
+    }
+  }
+
+  /// Get peer info by user address
+  static Future<Map<String, dynamic>?> getPeer(String userAddress) async {
+    try {
+      final url = Uri.parse('$baseUrl/api/peers/${Uri.encodeComponent(userAddress)}');
+      
+      final response = await http.get(
+        url,
+        headers: headers,
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['data'] as Map<String, dynamic>?;
+      } else {
+        return null;
+      }
+    } catch (e) {
+      print('❌ Get peer error: $e');
+      return null;
+    }
+  }
+
+  /// Get all peers in a workspace
+  static Future<List<Map<String, dynamic>>> getWorkspacePeers(String workspaceId) async {
+    try {
+      final url = Uri.parse('$baseUrl/api/peers/workspace/${Uri.encodeComponent(workspaceId)}');
+      
+      final response = await http.get(
+        url,
+        headers: headers,
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final peers = data['data'] as List?;
+        return peers?.map((p) => p as Map<String, dynamic>).toList() ?? [];
+      } else {
+        return [];
+      }
+    } catch (e) {
+      print('❌ Get workspace peers error: $e');
+      return [];
+    }
+  }
+
+  /// Get all active peers
+  static Future<List<Map<String, dynamic>>> getAllPeers() async {
+    try {
+      final url = Uri.parse('$baseUrl/api/peers');
+      
+      final response = await http.get(
+        url,
+        headers: headers,
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final peers = data['data'] as List?;
+        return peers?.map((p) => p as Map<String, dynamic>).toList() ?? [];
+      } else {
+        return [];
+      }
+    } catch (e) {
+      print('❌ Get all peers error: $e');
+      return [];
+    }
+  }
+
+  /// Connect to backend (compatible with MongoDBService.connect())
+  /// Non-blocking: Returns false if backend is unavailable but doesn't throw
+  /// For Cloudflare Tunnel, tries actual API call if health check fails
   static Future<bool> connect() async {
     try {
+      // Try health check first
       final isHealthy = await checkHealth();
+      
       if (isHealthy) {
         print('✅ Connected to backend successfully');
-      } else {
-        print('⚠️ Backend connection unavailable - app will work in offline mode');
+        return true;
       }
-      return isHealthy;
+      
+      // If health check failed, try actual API call (especially for Cloudflare Tunnel)
+      // Health check can timeout but API calls might still work
+      final isCloudflareTunnel = baseUrl.contains('trycloudflare.com') || 
+                                 baseUrl.contains('cloudflare');
+      
+      if (isCloudflareTunnel) {
+        print('⚠️ Health check failed, trying actual API call to verify server...');
+        try {
+          // Try a lightweight API call to verify server is actually accessible
+          final testUrl = Uri.parse('$baseUrl/');
+          final response = await http.get(testUrl, headers: headers).timeout(
+            const Duration(seconds: 8),
+            onTimeout: () {
+              throw TimeoutException('API call timeout');
+            },
+          );
+          
+          if (response.statusCode == 200) {
+            print('✅ Server is actually accessible (API call succeeded, health check was false negative)');
+            return true;
+          }
+        } catch (e) {
+          print('⚠️ API call also failed: ${e.toString().split('\n').first}');
+          // Continue to return false
+        }
+      }
+      
+      print('⚠️ Backend connection unavailable - app will work in offline mode');
+      print('💡 Server will be tried again when loading data (channels, profiles, etc.)');
+      return false;
     } catch (e) {
       // Don't throw - gracefully handle connection failures
       print('⚠️ Backend connection check failed: ${e.toString().split('\n').first}');
+      print('💡 Server will be tried again when loading data');
       return false;
     }
   }

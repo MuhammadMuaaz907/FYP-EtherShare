@@ -11,13 +11,10 @@ class NodeService {
    * Register a new node in the network (blockchain-like)
    */
   static async registerNode(nodeData) {
+    const startTime = process.hrtime.bigint(); // Start timing
+    
     try {
       const nodeId = `node_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-      
-      // Calculate gas for node registration
-      const gasUsed = GasCalculator.calculateNodeRegistrationGas(nodeData);
-      const gasPrice = GasCalculator.getCurrentGasPrice();
-      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
       
       // Get last node's hash for chain (BEFORE creating nodeDataForHash)
       const lastNode = await Node.findOne({ is_deprecated: false })
@@ -27,7 +24,7 @@ class NodeService {
       const previousHash = lastNode ? lastNode.current_hash : '0';
       const chainPosition = lastNode ? lastNode.chain_position + 1 : 0;
       
-      // Prepare node data (WITH correct chain_position for hash calculation)
+      // Prepare node data (WITHOUT gas for hash calculation - gas will be added after)
       const nodeDataForHash = {
         node_id: nodeId,
         node_name: nodeData.node_name || `Node-${nodeId.slice(-6)}`,
@@ -35,16 +32,13 @@ class NodeService {
         tcp_port: nodeData.tcp_port || 3001,
         public_key: nodeData.public_key || crypto.randomBytes(32).toString('hex'),
         status: 'online',
-        chain_position: chainPosition, // Use actual chain_position, not hardcoded 0
-        gas_used: gasUsed,
-        gas_price: gasPrice,
-        transaction_fee: transactionFee
+        chain_position: chainPosition // Use actual chain_position, not hardcoded 0
       };
       
       // Calculate current hash (blockchain-like) - using correct chain_position
       const currentHash = HashChain.calculateHash(nodeDataForHash, previousHash);
       
-      // Create node with hash chain
+      // Create node with hash chain (without gas initially)
       const node = new Node({
         ...nodeDataForHash,
         chain_position: chainPosition,
@@ -66,10 +60,33 @@ class NodeService {
       // Rebuild chain to ensure integrity
       await this.buildChain();
       
-      console.log(`✅ Node registered: ${nodeId} (Gas: ${gasUsed}, Fee: ${transactionFee})`);
+      // Calculate execution time and gas
+      const endTime = process.hrtime.bigint();
+      const executionTimeMs = Number(endTime - startTime) / 1000000; // Convert nanoseconds to milliseconds
+      
+      // Calculate gas based on execution time
+      const gasUsed = GasCalculator.calculateNodeRegistrationGas(executionTimeMs, nodeData);
+      const gasPrice = GasCalculator.getCurrentGasPrice();
+      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+      
+      // Update node with gas information
+      node.gas_used = gasUsed;
+      node.gas_price = gasPrice;
+      node.transaction_fee = transactionFee;
+      node.transaction_time_ms = Math.round(executionTimeMs * 100) / 100;
+      await node.save();
+      
+      console.log(`✅ Node registered: ${nodeId} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
       return node;
     } catch (error) {
-      console.error('❌ Node registration error:', error);
+      // Calculate gas even on error
+      const endTime = process.hrtime.bigint();
+      const executionTimeMs = Number(endTime - startTime) / 1000000;
+      const gasUsed = GasCalculator.calculateNodeRegistrationGas(executionTimeMs, nodeData);
+      const gasPrice = GasCalculator.getCurrentGasPrice();
+      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+      
+      console.error(`❌ Node registration error: ${error.message} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
       throw error;
     }
   }
@@ -98,6 +115,8 @@ class NodeService {
    * Nodes are immutable - any modification creates a new node
    */
   static async updateNode(oldNodeId, updatedData) {
+    const startTime = process.hrtime.bigint(); // Start timing
+    
     try {
       // Get old node
       const oldNode = await Node.findOne({ node_id: oldNodeId, is_deprecated: false });
@@ -106,12 +125,7 @@ class NodeService {
         throw new Error('Node not found');
       }
       
-      // Calculate gas for node update
-      const gasUsed = GasCalculator.calculateNodeUpdateGas(oldNode.toObject(), updatedData);
-      const gasPrice = GasCalculator.getCurrentGasPrice();
-      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
-      
-      // Create new node with updated data
+      // Create new node with updated data (without gas initially)
       const newNodeId = `node_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       
       const newNodeData = {
@@ -123,10 +137,7 @@ class NodeService {
         status: updatedData.status || oldNode.status,
         chain_position: oldNode.chain_position, // Same position
         previous_node_id: oldNode.previous_node_id,
-        next_node_id: oldNode.next_node_id,
-        gas_used: gasUsed,
-        gas_price: gasPrice,
-        transaction_fee: transactionFee
+        next_node_id: oldNode.next_node_id
       };
       
       // Get the previous node in chain (not the old node being updated)
@@ -233,10 +244,33 @@ class NodeService {
         console.error('❌ Node chain integrity check failed after update!');
       }
       
-      console.log(`✅ Node updated: ${oldNodeId} → ${newNodeId} (Gas: ${gasUsed}, Fee: ${transactionFee})`);
+      // Calculate execution time and gas
+      const endTime = process.hrtime.bigint();
+      const executionTimeMs = Number(endTime - startTime) / 1000000; // Convert nanoseconds to milliseconds
+      
+      // Calculate gas based on execution time
+      const gasUsed = GasCalculator.calculateNodeUpdateGas(executionTimeMs, oldNode.toObject(), updatedData);
+      const gasPrice = GasCalculator.getCurrentGasPrice();
+      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+      
+      // Update new node with gas information
+      newNode.gas_used = gasUsed;
+      newNode.gas_price = gasPrice;
+      newNode.transaction_fee = transactionFee;
+      newNode.transaction_time_ms = Math.round(executionTimeMs * 100) / 100;
+      await newNode.save();
+      
+      console.log(`✅ Node updated: ${oldNodeId} → ${newNodeId} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
       return newNode;
     } catch (error) {
-      console.error('❌ Update node error:', error);
+      // Calculate gas even on error
+      const endTime = process.hrtime.bigint();
+      const executionTimeMs = Number(endTime - startTime) / 1000000;
+      const gasUsed = GasCalculator.calculateNodeUpdateGas(executionTimeMs, {}, updatedData);
+      const gasPrice = GasCalculator.getCurrentGasPrice();
+      const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+      
+      console.error(`❌ Update node error: ${error.message} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
       throw error;
     }
   }

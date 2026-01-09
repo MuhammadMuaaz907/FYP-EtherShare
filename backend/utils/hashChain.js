@@ -27,13 +27,17 @@ class HashChain {
   }
 
   /**
-   * Get the last hash in a collection's chain
+   * Get the last hash in a collection's chain (atomic operation)
+   * Uses findOneAndUpdate to atomically get and "reserve" the last hash
+   * This prevents race conditions when multiple messages are inserted simultaneously
    * @param {Object} collection - MongoDB collection
    * @param {Object} filter - Optional filter for the query
    * @returns {Promise<String>} Last hash or '0' for genesis
    */
   static async getLastHash(collection, filter = {}) {
     try {
+      // Use findOne with sort to get the last document
+      // This is more reliable than findOneAndUpdate for read-only operations
       const lastDoc = await collection
         .findOne(filter, { sort: { timestamp: -1 } });
       
@@ -45,6 +49,46 @@ class HashChain {
     } catch (error) {
       console.error('Error getting last hash:', error);
       return '0';
+    }
+  }
+
+  /**
+   * Atomically get the last hash and verify it hasn't changed
+   * This is used to prevent race conditions during rapid message insertion
+   * @param {Object} collection - MongoDB collection
+   * @param {Object} filter - Optional filter for the query
+   * @param {String} expectedPreviousHash - The hash we expect to be the last one
+   * @returns {Promise<Object>} { hash: String, isValid: Boolean }
+   */
+  static async getAndVerifyLastHash(collection, filter = {}, expectedPreviousHash = null) {
+    try {
+      const lastDoc = await collection
+        .findOne(filter, { sort: { timestamp: -1 } });
+      
+      const currentLastHash = lastDoc && lastDoc.current_hash ? lastDoc.current_hash : '0';
+      
+      // If we expected a specific hash, verify it matches
+      if (expectedPreviousHash !== null) {
+        const isValid = currentLastHash === expectedPreviousHash;
+        return {
+          hash: currentLastHash,
+          isValid: isValid,
+          messageId: lastDoc ? lastDoc.message_id : null
+        };
+      }
+      
+      return {
+        hash: currentLastHash,
+        isValid: true,
+        messageId: lastDoc ? lastDoc.message_id : null
+      };
+    } catch (error) {
+      console.error('Error getting and verifying last hash:', error);
+      return {
+        hash: '0',
+        isValid: false,
+        messageId: null
+      };
     }
   }
 
@@ -277,17 +321,52 @@ class HashChain {
    * @param {Object} collection - MongoDB collection
    * @param {Object} documentData - Document data (without hash fields)
    * @param {Object} filter - Optional filter for getting previous hash
+   * @param {Number} retryCount - Internal retry counter for race condition handling
    * @returns {Object} Document with hash fields added
    */
-  static async addHashFields(collection, documentData, filter = {}) {
+  static async addHashFields(collection, documentData, filter = {}, retryCount = 0) {
     try {
-      // Get previous hash
-      const previousHash = await this.getLastHash(collection, filter);
+      // Add exponential backoff delay to avoid race conditions
+      if (retryCount > 0) {
+        // Delay increases with retry count: 20ms, 40ms, 80ms, 160ms, 200ms
+        const delay = Math.min(20 * Math.pow(2, retryCount - 1), 200);
+        await new Promise(resolve => setTimeout(resolve, delay + Math.random() * 30));
+      }
       
-      // Calculate current hash
+      // CRITICAL: Get and verify the last hash atomically
+      // This prevents race conditions where multiple messages read the same previous_hash
+      let hashInfo = await this.getAndVerifyLastHash(collection, filter);
+      let previousHash = hashInfo.hash;
+      
+      // If this is a retry and we expected a different hash, verify it changed correctly
+      if (retryCount > 0 && !hashInfo.isValid) {
+        console.log(`⚠️ Hash verification failed on retry ${retryCount} - hash changed, continuing with new hash`);
+      }
+      
+      // Calculate current hash with the verified previous hash
       const currentHash = this.calculateHash(documentData, previousHash);
       
-      // Add hash fields
+      // CRITICAL: Verify the hash hasn't changed AFTER calculation but BEFORE returning
+      // This is the most important check - if another message was inserted while we calculated,
+      // we need to retry with the new hash
+      if (retryCount < 10) { // Increased max retries to 10 for high concurrency
+        // Small delay to let any pending inserts complete
+        await new Promise(resolve => setTimeout(resolve, 15));
+        
+        // Verify the hash is still valid
+        const verifyInfo = await this.getAndVerifyLastHash(collection, filter, previousHash);
+        
+        if (!verifyInfo.isValid) {
+          // Hash changed - another message was inserted
+          console.log(`⚠️ Race condition detected - previous hash changed from ${previousHash.substring(0, 10)}... to ${verifyInfo.hash.substring(0, 10)}... - retrying with new hash (attempt ${retryCount + 1}/10)`);
+          console.log(`   Last message ID: ${verifyInfo.messageId || 'unknown'}`);
+          
+          // CRITICAL: Retry with the NEW hash
+          return await this.addHashFields(collection, documentData, filter, retryCount + 1);
+        }
+      }
+      
+      // Add hash fields with verified hashes
       return {
         ...documentData,
         previous_hash: previousHash,

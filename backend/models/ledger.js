@@ -70,6 +70,10 @@ const ledgerSchema = new mongoose.Schema({
     type: Number,
     default: 0 // Calculated as gas_used * gas_price
   },
+  transaction_time_ms: {
+    type: Number,
+    default: 0 // Execution time in milliseconds
+  },
   verified: {
     type: Boolean,
     default: false

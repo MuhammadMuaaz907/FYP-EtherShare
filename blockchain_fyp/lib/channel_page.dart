@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:get_it/get_it.dart';
-import 'services/distributed_service.dart';
+import 'services/distributed_service.dart' show DistributedService, ChainBrokenException;
+import 'services/hybrid_storage_service.dart';
 import 'services/session_service.dart';
+import 'services/p2p_service.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -67,11 +69,26 @@ class _ChannelPageState extends State<ChannelPage> {
   List<double> _waveformData = [];
   Offset? _panStartPosition;
 
+  // Real-time message updates
+  Timer? _messagePollingTimer;
+  bool _isCheckingMessages = false;
+  DateTime? _lastMessageCheckTime;
+  
+  // Workspace ID (resolved from workspace name)
+  String? _workspaceId;
+  
+  /// Get workspace ID (resolved from workspace name)
+  /// This ensures consistent workspace ID usage throughout the page
+  String get _effectiveWorkspaceId {
+    return _workspaceId ?? widget.workspaceName;
+  }
+
   @override
   void initState() {
     super.initState();
     _currentChannelName = widget.channelName;
     _resolveChannelDisplayName();
+    _resolveWorkspaceId(); // Resolve workspace ID first
     _loadUserNameAndMessages();
     _loadWorkspaceMembers();
     _textListener = () {
@@ -80,6 +97,132 @@ class _ChannelPageState extends State<ChannelPage> {
       });
     };
     _messageController.addListener(_textListener);
+    
+    // Set up real-time message updates
+    _setupRealTimeUpdates();
+  }
+  
+  /// Set up real-time message updates (polling + P2P callbacks)
+  void _setupRealTimeUpdates() {
+    // Set up P2P callback for real-time messages
+    P2PService.instance.onMessageReceived = (message) {
+      // Check if message is for current channel
+      final messageChannelId = message['channel_id']?.toString() ?? '';
+      final messageWorkspaceId = message['workspace_id']?.toString() ?? '';
+      
+      // Ensure workspace ID is resolved for comparison
+      if (_workspaceId == null) {
+        _resolveWorkspaceId().then((_) {
+          _handleP2PMessage(message);
+        });
+      } else {
+        _handleP2PMessage(message);
+      }
+    };
+    
+    // Start periodic polling for new messages (every 2 seconds)
+    _messagePollingTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (mounted && !_isCheckingMessages && !_isLoadingMessages) {
+        _checkForNewMessages();
+      }
+    });
+  }
+  
+  /// Handle P2P message received callback
+  void _handleP2PMessage(Map<String, dynamic> message) {
+    final messageChannelId = message['channel_id']?.toString() ?? '';
+    final messageWorkspaceId = message['workspace_id']?.toString() ?? '';
+    
+    // Ensure workspace ID is resolved for comparison
+    final effectiveWorkspaceId = _workspaceId ?? widget.workspaceName;
+    
+    // Match by both workspace ID and workspace name (for backward compatibility)
+    final workspaceMatches = messageWorkspaceId == effectiveWorkspaceId || 
+                             messageWorkspaceId == widget.workspaceName ||
+                             effectiveWorkspaceId == messageWorkspaceId;
+    
+    // Match channel (case-insensitive)
+    final channelMatches = messageChannelId.toLowerCase() == widget.channelName.toLowerCase();
+    
+    if (channelMatches && workspaceMatches) {
+      print('📨 Real-time P2P message received for current channel');
+      print('   Message workspace: $messageWorkspaceId, Current workspace: $effectiveWorkspaceId');
+      print('   Message channel: $messageChannelId, Current channel: ${widget.channelName}');
+      print('   Message ID: ${message['message_id']}');
+      
+      // Force immediate check for new messages (don't wait for polling)
+      if (mounted && !_isCheckingMessages && !_isLoadingMessages) {
+        _checkForNewMessages();
+      } else {
+        print('⚠️ Cannot check for new messages: mounted=$mounted, checking=$_isCheckingMessages, loading=$_isLoadingMessages');
+      }
+    } else {
+      print('⚠️ P2P message not for current channel/workspace');
+      print('   Message workspace: $messageWorkspaceId, Current: $effectiveWorkspaceId');
+      print('   Message channel: $messageChannelId, Current: ${widget.channelName}');
+      print('   Workspace match: $workspaceMatches, Channel match: $channelMatches');
+    }
+    
+    print('✅ Real-time message updates enabled (polling every 2s + P2P callbacks)');
+  }
+
+  /// Resolve workspace ID from workspace name
+  /// This ensures we use the correct workspace ID for all operations
+  Future<void> _resolveWorkspaceId() async {
+    try {
+      if (userAddress == null) {
+        userAddress = await SessionService.getUserAddress();
+      }
+      
+      if (userAddress == null) {
+        print('⚠️ Cannot resolve workspace ID: user address is null');
+        _workspaceId = widget.workspaceName; // Fallback to name
+        return;
+      }
+      
+      print('🔍 Resolving workspace ID for workspace name: ${widget.workspaceName}');
+      
+      // Try to get workspace ID from SQLite first (works offline)
+      final sqliteWorkspaces = await HybridStorageService.instance.getUserWorkspaces(userAddress!);
+      final sqliteWorkspace = sqliteWorkspaces.firstWhere(
+        (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+        orElse: () => {},
+      );
+      
+      if (sqliteWorkspace.isNotEmpty) {
+        _workspaceId = sqliteWorkspace['workspace_id']?.toString() ?? 
+                      sqliteWorkspace['workspaceId']?.toString() ??
+                      widget.workspaceName;
+        print('✅ Resolved workspace ID from SQLite: $_workspaceId');
+        return;
+      }
+      
+      // If not in SQLite, try server (if online)
+      try {
+        final serverWorkspaces = await DistributedService.getUserWorkspaces(userAddress!);
+        final serverWorkspace = serverWorkspaces.firstWhere(
+          (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+          orElse: () => {},
+        );
+        
+        if (serverWorkspace.isNotEmpty) {
+          _workspaceId = serverWorkspace['workspace_id']?.toString() ?? 
+                        serverWorkspace['workspaceId']?.toString() ??
+                        widget.workspaceName;
+          print('✅ Resolved workspace ID from server: $_workspaceId');
+          return;
+        }
+      } catch (e) {
+        print('⚠️ Could not resolve workspace ID from server: $e');
+      }
+      
+      // Fallback to workspace name (might be the ID already)
+      _workspaceId = widget.workspaceName;
+      print('⚠️ Using workspace name as ID (fallback): $_workspaceId');
+    } catch (e) {
+      print('❌ Error resolving workspace ID: $e');
+      _workspaceId = widget.workspaceName; // Fallback
+    }
   }
 
   /// Resolve channel display name from SharedPreferences (takes priority)
@@ -110,6 +253,15 @@ class _ChannelPageState extends State<ChannelPage> {
 
   @override
   void dispose() {
+    // Cancel real-time update timer
+    _messagePollingTimer?.cancel();
+    _messagePollingTimer = null;
+    
+    // IMPORTANT: Don't set callback to null - let it be overwritten by next channel page
+    // OR set it back to HybridStorageService callback for server sync
+    // Setting to null breaks P2P message reception when channel page is closed
+    // P2PService.instance.onMessageReceived = null; // REMOVED - causes callback loss
+    
     _messageController.removeListener(_textListener);
     _messageController.dispose();
     _fileCache.clear();
@@ -185,18 +337,32 @@ class _ChannelPageState extends State<ChannelPage> {
     super.didChangeDependencies();
     _resolveChannelDisplayName();
 
-    // Reload messages when page is reopened (only if not already loading and not already loaded)
-    // This ensures messages are fresh from database when returning to the page
+    // Reload messages when page is reopened (only if not already loading)
+    // Reset _messagesLoaded flag to allow fresh load when returning to page
     // The _isLoadingMessages flag prevents multiple simultaneous loads
-    if (!_isLoadingMessages && !_messagesLoaded && mounted) {
+    if (!_isLoadingMessages && mounted) {
+      _messagesLoaded = false; // Reset to allow fresh load
       _loadMessages();
     }
   }
 
   Future<void> _checkForNewMessages() async {
+    // Prevent multiple simultaneous checks
+    if (_isCheckingMessages || !mounted) {
+      return;
+    }
+    
+    _isCheckingMessages = true;
+    
     try {
-      final loaded = await DistributedService.getChannelMessages(
-        workspaceId: widget.workspaceName,
+      // Ensure workspace ID is resolved
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      
+      // Use HybridStorageService (works offline)
+      final loaded = await HybridStorageService.instance.getChannelMessages(
+        workspaceId: _effectiveWorkspaceId,
         channelId: widget.channelName,
       );
 
@@ -208,15 +374,143 @@ class _ChannelPageState extends State<ChannelPage> {
         }
       }
 
-      if (loaded.length != _messages.length) {
-        setState(() {
-          _messages.clear();
-          _messages.addAll(loaded);
-        });
-        _preloadMediaFiles(loaded);
+      // Use proper deduplication instead of length comparison
+      final existingMessageIds = _messages.map((m) => _getMessageId(m)).whereType<String>().toSet();
+      
+      // Also check for temporary message IDs that need to be replaced with real IDs
+      final tempMessageIds = _messages
+          .where((m) {
+            final id = _getMessageId(m);
+            return id != null && id.toString().startsWith('temp_');
+          })
+          .map((m) => _getMessageId(m))
+          .whereType<String>()
+          .toList();
+      
+      // Find new messages (not already in _messages) and update temporary IDs
+      final newMessages = <Map<String, dynamic>>[];
+      for (final msg in loaded) {
+        final msgId = _getMessageId(msg);
+        if (msgId != null && !existingMessageIds.contains(msgId)) {
+          // Check if this message matches a temporary message (same content, sender, timestamp)
+          // This handles the case where we added a message locally with temp ID, and now we got the real one
+          final msgContent = (msg['content']?.toString() ?? 
+                           msg['message_text']?.toString() ?? 
+                           msg['messageText']?.toString() ?? '').trim();
+          final msgSender = msg['sender_address']?.toString() ?? 
+                          msg['senderAddress']?.toString() ?? 
+                          msg['userAddress']?.toString() ?? '';
+          final msgTimestamp = msg['timestamp'] is DateTime 
+              ? (msg['timestamp'] as DateTime).millisecondsSinceEpoch 
+              : (msg['timestamp'] is int ? msg['timestamp'] as int : 0);
+          
+          // Try to find and replace temporary message with same content/sender/timestamp
+          bool replacedTemp = false;
+          if (tempMessageIds.isNotEmpty && msgContent.isNotEmpty && msgSender.isNotEmpty) {
+            for (int i = 0; i < _messages.length; i++) {
+              final existingMsg = _messages[i];
+              final existingId = _getMessageId(existingMsg);
+              if (existingId != null && existingId.toString().startsWith('temp_')) {
+                final existingContent = (existingMsg['content']?.toString() ?? 
+                                       existingMsg['message_text']?.toString() ?? 
+                                       existingMsg['messageText']?.toString() ?? '').trim();
+                final existingSender = existingMsg['userAddress']?.toString() ?? 
+                                     existingMsg['sender_address']?.toString() ?? 
+                                     existingMsg['senderAddress']?.toString() ?? '';
+                final existingTimestamp = existingMsg['timestamp'] is DateTime 
+                    ? (existingMsg['timestamp'] as DateTime).millisecondsSinceEpoch 
+                    : (existingMsg['timestamp'] is int ? existingMsg['timestamp'] as int : 0);
+                
+                // Match if content, sender, and timestamp are close (within 5 seconds)
+                if (existingContent == msgContent && 
+                    existingSender.toLowerCase() == msgSender.toLowerCase() &&
+                    (existingTimestamp - msgTimestamp).abs() < 5000) {
+                  // Replace temporary message with real one
+                  _messages[i] = msg;
+                  replacedTemp = true;
+                  print('🔄 Replaced temporary message (${existingId.substring(0, 20)}...) with real message_id: $msgId');
+                  break;
+                }
+              }
+            }
+          }
+          
+          if (!replacedTemp) {
+            newMessages.add(msg);
+            existingMessageIds.add(msgId);
+          }
+        }
       }
+      
+      // CRITICAL: Always perform final deduplication, even if no new messages
+      // This ensures any duplicates that somehow got into _messages are removed
+      if (mounted) {
+        print('📥 Real-time update: Found ${newMessages.length} new messages (${loaded.length} total, ${_messages.length} existing)');
+        
+        setState(() {
+          // Add new messages if any
+          if (newMessages.isNotEmpty) {
+            _messages.addAll(newMessages);
+          }
+          
+          // Sort by timestamp after adding
+          _messages.sort((a, b) {
+            final aTime = a['timestamp'] is DateTime 
+                ? (a['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (a['timestamp'] is int ? a['timestamp'] as int : 0);
+            final bTime = b['timestamp'] is DateTime 
+                ? (b['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (b['timestamp'] is int ? b['timestamp'] as int : 0);
+            return aTime.compareTo(bTime);
+          });
+          
+          // CRITICAL: ALWAYS perform final deduplication pass (even if no new messages)
+          // This removes any duplicates that might have been added previously
+          final finalMessageIds = <String>{};
+          final deduplicatedMessages = <Map<String, dynamic>>[];
+          for (final msg in _messages) {
+            final msgId = _getMessageId(msg);
+            if (msgId != null && !finalMessageIds.contains(msgId)) {
+              deduplicatedMessages.add(msg);
+              finalMessageIds.add(msgId);
+            } else if (msgId != null) {
+              print('⚠️ Duplicate detected and removed: $msgId');
+            }
+          }
+          
+          // Always update _messages with deduplicated list (even if no changes)
+          // This ensures clean state and prevents accumulation of duplicates
+          if (deduplicatedMessages.length != _messages.length) {
+            print('⚠️ Final deduplication: removed ${_messages.length - deduplicatedMessages.length} duplicates');
+            _messages.clear();
+            _messages.addAll(deduplicatedMessages);
+            _messages.sort((a, b) {
+              final aTime = a['timestamp'] is DateTime 
+                  ? (a['timestamp'] as DateTime).millisecondsSinceEpoch 
+                  : (a['timestamp'] is int ? a['timestamp'] as int : 0);
+              final bTime = b['timestamp'] is DateTime 
+                  ? (b['timestamp'] as DateTime).millisecondsSinceEpoch 
+                  : (b['timestamp'] is int ? b['timestamp'] as int : 0);
+              return aTime.compareTo(bTime);
+            });
+          } else if (newMessages.isNotEmpty) {
+            print('✅ Real-time update: Added ${newMessages.length} new messages to UI (no duplicates found)');
+          }
+        });
+        
+        if (newMessages.isNotEmpty) {
+          _preloadMediaFiles(newMessages);
+        }
+      }
+    } on ChainBrokenException catch (e) {
+      // Chain broken - don't update messages, but don't crash
+      print('⚠️ Chain integrity compromised during real-time update - skipping message update');
+      print('   Broken at: ${e.brokenAt}');
+      // Don't show error to user for real-time updates - just skip
     } catch (e) {
-      print('Error checking for new messages: $e');
+      print('❌ Error checking for new messages: $e');
+    } finally {
+      _isCheckingMessages = false;
     }
   }
 
@@ -241,7 +535,7 @@ class _ChannelPageState extends State<ChannelPage> {
 
   Future<String?> _getUserNameFromMongoDB() async {
     if (userAddress == null) return null;
-      final profile = await DistributedService.getUserProfile(userAddress!);
+      final profile = await HybridStorageService.instance.getUserProfile(userAddress!);
     return profile?['username'];
   }
 
@@ -249,13 +543,25 @@ class _ChannelPageState extends State<ChannelPage> {
     setState(() => _isLoadingMembers = true);
     try {
       if (userAddress == null) await _loadUserAddress();
-      final members = await DistributedService.getWorkspaceMembers(widget.workspaceName);
+      
+      // Ensure workspace ID is resolved
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      
+      // Use resolved workspace ID (critical for P2P to work)
+      print('👥 Loading workspace members for workspace ID: $_effectiveWorkspaceId (name: ${widget.workspaceName})');
+      
+      // Use HybridStorageService (works offline)
+      final members = await HybridStorageService.instance.getWorkspaceMembers(_effectiveWorkspaceId);
+      print('✅ Loaded ${members.length} workspace members');
+      
       setState(() {
         _memberCount = members.length;
         _isLoadingMembers = false;
       });
     } catch (e) {
-      print('Error loading workspace members: $e');
+      print('❌ Error loading workspace members: $e');
       setState(() {
         _isLoadingMembers = false;
         _memberCount = 0;
@@ -271,6 +577,39 @@ class _ChannelPageState extends State<ChannelPage> {
       debugPrint('Error getting profile name: $e');
       return null;
     }
+  }
+
+  /// Get consistent message ID from message map
+  String? _getMessageId(Map<String, dynamic> msg) {
+    // Try message_id first (most reliable)
+    final messageId = msg['message_id']?.toString();
+    if (messageId != null && messageId.isNotEmpty) {
+      return messageId;
+    }
+    
+    // Try id as fallback
+    final id = msg['id']?.toString();
+    if (id != null && id.isNotEmpty) {
+      return id;
+    }
+    
+    // Generate composite ID from timestamp, sender, and content (last resort)
+    final timestamp = msg['timestamp'];
+    final sender = msg['userAddress']?.toString() ?? 
+                   msg['sender_address']?.toString() ?? 
+                   msg['senderAddress']?.toString() ?? '';
+    final content = (msg['content']?.toString() ?? 
+                    msg['message_text']?.toString() ?? 
+                    msg['messageText']?.toString() ?? '').trim();
+    
+    if (timestamp != null && sender.isNotEmpty && content.isNotEmpty) {
+      final timestampStr = timestamp is DateTime 
+          ? timestamp.millisecondsSinceEpoch.toString()
+          : (timestamp is int ? timestamp.toString() : timestamp.toString());
+      return '${timestampStr}_${sender}_${content.substring(0, content.length > 50 ? 50 : content.length)}';
+    }
+    
+    return null;
   }
 
   Future<void> _loadMessages() async {
@@ -293,47 +632,72 @@ class _ChannelPageState extends State<ChannelPage> {
     try {
       print('📥 Loading messages for channel: ${widget.channelName} in workspace: ${widget.workspaceName}');
       
-      final loaded = await DistributedService.getChannelMessages(
-        workspaceId: widget.workspaceName,
+      // Ensure workspace ID is resolved
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      
+      // Use HybridStorageService (works offline)
+      final loaded = await HybridStorageService.instance.getChannelMessages(
+        workspaceId: _effectiveWorkspaceId,
         channelId: widget.channelName,
       );
 
       print('✅ Loaded ${loaded.length} messages from database');
+      
+      // Debug: Log first message structure if available
+      if (loaded.isNotEmpty) {
+        print('📋 First message structure: ${loaded.first.keys.toList()}');
+        print('📋 First message content fields:');
+        print('   - content: ${loaded.first['content']}');
+        print('   - message_text: ${loaded.first['message_text']}');
+        print('   - messageText: ${loaded.first['messageText']}');
+        print('   - sender_address: ${loaded.first['sender_address']}');
+        print('   - timestamp type: ${loaded.first['timestamp'].runtimeType}');
+        print('   - timestamp value: ${loaded.first['timestamp']}');
+      } else {
+        print('⚠️ No messages loaded from database!');
+      }
 
       // Transform database format to UI format
       final transformedMessages = <Map<String, dynamic>>[];
       
       for (var msg in loaded) {
-        // Convert timestamp to DateTime
+        // Convert timestamp to DateTime (should already be DateTime from DistributedService, but handle all cases)
         DateTime timestamp;
-        if (msg['timestamp'] is String) {
+        if (msg['timestamp'] is DateTime) {
+          timestamp = msg['timestamp'] as DateTime;
+        } else if (msg['timestamp'] is String) {
           timestamp = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
         } else if (msg['timestamp'] is int) {
-          timestamp = DateTime.fromMillisecondsSinceEpoch(msg['timestamp']);
-        } else if (msg['timestamp'] is DateTime) {
-          timestamp = msg['timestamp'];
+          timestamp = DateTime.fromMillisecondsSinceEpoch(msg['timestamp'] as int);
         } else {
           timestamp = DateTime.now();
         }
 
         // Get sender address (try multiple field names)
         final senderAddress = msg['sender_address']?.toString() ?? 
+                            msg['senderAddress']?.toString() ??
                             msg['userAddress']?.toString() ?? 
                             msg['sender']?.toString() ?? 
                             '';
 
-        // Skip messages that are completely empty (no content, no file, no type)
-      final hasContent = (msg['content']?.toString() ?? '').trim().isNotEmpty ||
-                        (msg['message_text']?.toString() ?? '').trim().isNotEmpty ||
-                        (msg['messageText']?.toString() ?? '').trim().isNotEmpty;
+        // Get message content (try multiple field names)
+        final messageContent = (msg['content']?.toString() ?? '').trim() +
+                              (msg['message_text']?.toString() ?? '').trim() +
+                              (msg['messageText']?.toString() ?? '').trim();
+        
+        // Check if message has content or file
+        final hasContent = messageContent.isNotEmpty;
       final hasFile = (msg['fileId']?.toString() ?? '').isNotEmpty ||
                      (msg['file_id']?.toString() ?? '').isNotEmpty ||
                      (msg['cid']?.toString() ?? '').isNotEmpty ||
                      (msg['fileCid']?.toString() ?? '').isNotEmpty ||
                      (msg['fileName']?.toString() ?? '').isNotEmpty;
       
+        // Only skip if message is truly empty (no content AND no file)
       if (!hasContent && !hasFile) {
-        print('⚠️ Skipping empty message: $msg');
+          print('⚠️ Skipping empty message (no content, no file): message_id=${msg['message_id']}');
         continue; // Skip this message
       }
 
@@ -460,11 +824,86 @@ class _ChannelPageState extends State<ChannelPage> {
 
       // Only update state if widget is still mounted
       if (mounted) {
+        print('📊 Message transformation summary:');
+        print('   - Loaded from DB: ${loaded.length} messages');
+        print('   - Transformed: ${transformedMessages.length} messages');
+        print('   - Skipped: ${loaded.length - transformedMessages.length} messages');
+        
         setState(() {
-          _messages.clear();
-          _messages.addAll(transformedMessages);
+          // Always use proper deduplication using consistent message ID
+          final existingMessageIds = _messages.map((m) => _getMessageId(m)).whereType<String>().toSet();
+          
+          // Filter out duplicates from transformed messages
+          final uniqueMessages = <Map<String, dynamic>>[];
+          for (final msg in transformedMessages) {
+            final msgId = _getMessageId(msg);
+            
+            if (msgId != null && !existingMessageIds.contains(msgId)) {
+              uniqueMessages.add(msg);
+              existingMessageIds.add(msgId);
+            } else if (msgId != null) {
+              print('⚠️ Skipping duplicate message: $msgId');
+            } else {
+              print('⚠️ Skipping message with no valid ID');
+            }
+          }
+          
+          print('📊 Deduplication: ${transformedMessages.length} total loaded, ${_messages.length} existing, ${uniqueMessages.length} new unique');
+          
+          // Always clear and reload on fresh load to ensure clean state
+          // This prevents duplicates when reopening channel
+          if (!_messagesLoaded) {
+            print('🔄 Fresh load: clearing existing messages and loading ${uniqueMessages.length} unique messages');
+            _messages.clear();
+            _messages.addAll(uniqueMessages);
+          } else {
+            // Incremental: only add new unique messages
+            print('➕ Incremental load: adding ${uniqueMessages.length} new messages');
+            _messages.addAll(uniqueMessages);
+          }
+          
+          // Always sort by timestamp to maintain order
+          _messages.sort((a, b) {
+            final aTime = a['timestamp'] is DateTime 
+                ? (a['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (a['timestamp'] is int ? a['timestamp'] as int : 0);
+            final bTime = b['timestamp'] is DateTime 
+                ? (b['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (b['timestamp'] is int ? b['timestamp'] as int : 0);
+            return aTime.compareTo(bTime);
+          });
+          
+          // Final deduplication pass (safety check) - use consistent ID function
+          final finalMessageIds = <String>{}; 
+          final deduplicatedMessages = <Map<String, dynamic>>[];
+          for (final msg in _messages) {
+            final msgId = _getMessageId(msg);
+            
+            if (msgId != null && !finalMessageIds.contains(msgId)) {
+              deduplicatedMessages.add(msg);
+              finalMessageIds.add(msgId);
+            } else if (msgId != null) {
+              print('⚠️ Final deduplication: removed duplicate $msgId');
+            }
+          }
+          
+          if (deduplicatedMessages.length != _messages.length) {
+            print('⚠️ Final deduplication: removed ${_messages.length - deduplicatedMessages.length} duplicates');
+            _messages.clear();
+            _messages.addAll(deduplicatedMessages);
+            // Re-sort after deduplication
+            _messages.sort((a, b) {
+              final aTime = a['timestamp'] is DateTime 
+                  ? (a['timestamp'] as DateTime).millisecondsSinceEpoch 
+                  : (a['timestamp'] is int ? a['timestamp'] as int : 0);
+              final bTime = b['timestamp'] is DateTime 
+                  ? (b['timestamp'] as DateTime).millisecondsSinceEpoch 
+                  : (b['timestamp'] is int ? b['timestamp'] as int : 0);
+              return aTime.compareTo(bTime);
+            });
+          }
         });
-        print('✅ Messages loaded into UI: ${_messages.length} messages');
+        print('✅ Messages loaded into UI: ${_messages.length} unique messages');
       } else {
         print('⚠️ Widget disposed, skipping setState');
       }
@@ -478,6 +917,7 @@ class _ChannelPageState extends State<ChannelPage> {
       // Chain integrity compromised - hide all messages and show error
       print('❌ Chain integrity compromised: ${e.message}');
       print('   Broken at: ${e.brokenAt}');
+      print('   Details: ${e.details}');
       
       if (mounted) {
         setState(() {
@@ -486,15 +926,43 @@ class _ChannelPageState extends State<ChannelPage> {
           status = '⚠️ Data integrity compromised. Messages cannot be displayed for security reasons.';
         });
         
-        // Show error dialog to user
+        // Show prominent error dialog to user
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              '⚠️ Data integrity check failed. Messages are hidden for security.',
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '⚠️ Chain Integrity Compromised',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Data integrity check failed. Messages are hidden for security. A message may have been modified.',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                  ),
+                ),
+                if (e.brokenAt != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Broken at: ${e.brokenAt}',
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ],
             ),
             backgroundColor: Colors.red[700],
-            duration: const Duration(seconds: 5),
+            duration: const Duration(seconds: 8),
             action: SnackBarAction(
               label: 'OK',
               textColor: Colors.white,
@@ -591,7 +1059,7 @@ class _ChannelPageState extends State<ChannelPage> {
         final fileId = await DistributedService.uploadFile(
           fileBytes: imageBytes,
           fileName: fileName,
-          workspaceId: widget.workspaceName,
+          workspaceId: _effectiveWorkspaceId,
           uploaderAddress: userAddress!,
           mimeType: 'image/jpeg',
         );
@@ -641,12 +1109,17 @@ class _ChannelPageState extends State<ChannelPage> {
         print('  - fileId: ${msg['fileId']}');
         print('  - type: ${msg['type']}');
 
-        // Add to local state immediately
+        // Generate temporary message ID for local display (will be replaced by server message_id)
+        final tempMessageId = 'temp_img_${DateTime.now().millisecondsSinceEpoch}_${userAddress}';
+        final messageTimestamp = DateTime.now();
+        
+        // Add to local state immediately with temporary ID
         if (mounted) {
           setState(() {
             _messages.add({
               ...msg,
-              'timestamp': DateTime.now(),
+              'timestamp': messageTimestamp,
+              'message_id': tempMessageId, // Temporary ID for deduplication
             });
             status = fileId != null 
                 ? 'Image sent successfully!' 
@@ -654,9 +1127,9 @@ class _ChannelPageState extends State<ChannelPage> {
           });
         }
 
-        // Save to database
-        final result = await DistributedService.addMessage(
-          workspaceId: widget.workspaceName,
+        // Save to database (works offline + P2P)
+        final result = await HybridStorageService.instance.addMessage(
+          workspaceId: _effectiveWorkspaceId,
           channelId: widget.channelName,
           senderAddress: userAddress!,
           messageText: msg['content'].toString(),
@@ -667,13 +1140,23 @@ class _ChannelPageState extends State<ChannelPage> {
         if (!success) {
           if (mounted) {
             setState(() {
-              _messages.removeLast();
+              _messages.removeWhere((m) => _getMessageId(m) == tempMessageId);
               status = 'Failed to save image message';
             });
           }
           print('❌ Failed to save image message to database');
         } else {
-          print('✅ Image message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}');
+          // Update the local message with the real message_id from server
+          if (mounted) {
+            setState(() {
+              final index = _messages.indexWhere((m) => _getMessageId(m) == tempMessageId);
+              if (index >= 0) {
+                _messages[index]['message_id'] = result;
+                _messages[index]['id'] = result;
+              }
+            });
+          }
+          print('✅ Image message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}, message_id: $result');
           // Clear status after a short delay
           Future.delayed(const Duration(seconds: 2), () {
             if (mounted) {
@@ -762,7 +1245,7 @@ class _ChannelPageState extends State<ChannelPage> {
         final fileId = await DistributedService.uploadFile(
           fileBytes: mediaBytes,
           fileName: finalFileName,
-          workspaceId: widget.workspaceName,
+          workspaceId: _effectiveWorkspaceId,
           uploaderAddress: userAddress!,
           mimeType: mimeType,
         );
@@ -817,12 +1300,17 @@ class _ChannelPageState extends State<ChannelPage> {
         print('  - fileId: ${msg['fileId']}');
         print('  - type: ${msg['type']}');
 
-        // Add to local state immediately
+        // Generate temporary message ID for local display (will be replaced by server message_id)
+        final tempMessageId = 'temp_media_${DateTime.now().millisecondsSinceEpoch}_${userAddress}';
+        final messageTimestamp = DateTime.now();
+        
+        // Add to local state immediately with temporary ID
         if (mounted) {
           setState(() {
             _messages.add({
               ...msg,
-              'timestamp': DateTime.now(),
+              'timestamp': messageTimestamp,
+              'message_id': tempMessageId, // Temporary ID for deduplication
             });
             status = fileId != null
                 ? (isVideo ? 'Video sent successfully!' : 'Image sent successfully!')
@@ -830,9 +1318,9 @@ class _ChannelPageState extends State<ChannelPage> {
           });
         }
 
-        // Save to database
-        final result = await DistributedService.addMessage(
-          workspaceId: widget.workspaceName,
+        // Save to database (works offline + P2P)
+        final result = await HybridStorageService.instance.addMessage(
+          workspaceId: _effectiveWorkspaceId,
           channelId: widget.channelName,
           senderAddress: userAddress!,
           messageText: msg['content'].toString(),
@@ -843,13 +1331,23 @@ class _ChannelPageState extends State<ChannelPage> {
         if (!success) {
           if (mounted) {
             setState(() {
-              _messages.removeLast();
+              _messages.removeWhere((m) => _getMessageId(m) == tempMessageId);
               status = 'Failed to save media message';
             });
           }
           print('❌ Failed to save gallery media message to database');
         } else {
-          print('✅ Gallery media message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}');
+          // Update the local message with the real message_id from server
+          if (mounted) {
+            setState(() {
+              final index = _messages.indexWhere((m) => _getMessageId(m) == tempMessageId);
+              if (index >= 0) {
+                _messages[index]['message_id'] = result;
+                _messages[index]['id'] = result;
+              }
+            });
+          }
+          print('✅ Gallery media message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}, message_id: $result');
           // Clear status after a short delay
           Future.delayed(const Duration(seconds: 2), () {
             if (mounted) {
@@ -907,7 +1405,7 @@ class _ChannelPageState extends State<ChannelPage> {
         final fileId = await DistributedService.uploadFile(
           fileBytes: fileBytes,
           fileName: result.files.single.name,
-          workspaceId: widget.workspaceName,
+          workspaceId: _effectiveWorkspaceId,
           uploaderAddress: userAddress!,
           mimeType: result.files.single.extension != null 
               ? 'application/${result.files.single.extension}' 
@@ -955,22 +1453,27 @@ class _ChannelPageState extends State<ChannelPage> {
         print('  - fileId: ${msg['fileId']}');
         print('  - fileSize: ${msg['fileSize']} bytes');
           
-        // Add to local state immediately
+        // Generate temporary message ID for local display (will be replaced by server message_id)
+        final tempMessageId = 'temp_file_${DateTime.now().millisecondsSinceEpoch}_${userAddress}';
+        final timestamp = DateTime.now();
+        
+        // Add to local state immediately with temporary ID
         if (mounted) {
           setState(() {
             _messages.add({
               ...msg,
-              'timestamp': DateTime.now(),
+              'timestamp': timestamp,
+              'message_id': tempMessageId, // Temporary ID for deduplication
             });
             status = fileId != null 
                 ? 'File uploaded successfully!' 
                 : 'File saved locally (upload failed)';
           });
         }
-          
+        
         // Save to database
         final mongoResult = await DistributedService.addMessage(
-          workspaceId: widget.workspaceName,
+          workspaceId: _effectiveWorkspaceId,
           channelId: widget.channelName,
           senderAddress: userAddress!,
           messageText: msg['content'].toString(),
@@ -981,13 +1484,23 @@ class _ChannelPageState extends State<ChannelPage> {
         if (!success) {
           if (mounted) {
             setState(() {
-              _messages.removeLast();
+              _messages.removeWhere((m) => _getMessageId(m) == tempMessageId);
               status = 'Failed to save file message';
             });
           }
           print('❌ Failed to save file message to database');
         } else {
-          print('✅ File message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}');
+          // Update the local message with the real message_id from server
+          if (mounted) {
+            setState(() {
+              final index = _messages.indexWhere((m) => _getMessageId(m) == tempMessageId);
+              if (index >= 0) {
+                _messages[index]['message_id'] = mongoResult;
+                _messages[index]['id'] = mongoResult;
+              }
+            });
+          }
+          print('✅ File message saved successfully${fileId != null ? " with fileId: $fileId" : " (local only)"}, message_id: $mongoResult');
         }
       } else {
         setState(() {
@@ -1007,34 +1520,55 @@ class _ChannelPageState extends State<ChannelPage> {
 
     if (userAddress == null) await _loadUserAddress();
 
+    final messageText = _messageController.text.trim();
+    _messageController.clear();
+
+    // Generate temporary message ID for local display (will be replaced by server message_id)
+    final tempMessageId = 'temp_${DateTime.now().millisecondsSinceEpoch}_${userAddress}';
+    final timestamp = DateTime.now();
+
     final msg = {
       'type': 'text',
-      'content': _messageController.text.trim(),
-      'timestamp': DateTime.now(),
+      'content': messageText,
+      'timestamp': timestamp,
       'senderName': currentUserName,
       'userAddress': userAddress ?? '',
       'workspace': widget.workspaceName,
       'channel': widget.channelName,
+      'message_id': tempMessageId, // Temporary ID for deduplication
     };
 
+    // Add to UI immediately with temporary ID
     setState(() {
       _messages.add(msg);
     });
 
-    _messageController.clear();
-
-    final result = await DistributedService.addMessage(
-      workspaceId: widget.workspaceName,
+    // Use HybridStorageService (works offline + P2P)
+    final result = await HybridStorageService.instance.addMessage(
+      workspaceId: _effectiveWorkspaceId,
       channelId: widget.channelName,
       senderAddress: userAddress!,
-      messageText: msg['content'].toString(),
+      messageText: messageText,
     );
 
     if (result == null) {
+      // Remove the message if sending failed
       setState(() {
-        _messages.removeLast();
+        _messages.removeWhere((m) => _getMessageId(m) == tempMessageId);
         status = 'Failed to send message';
       });
+    } else {
+      // Update the local message with the real message_id from server
+      // This ensures deduplication works correctly
+      setState(() {
+        final index = _messages.indexWhere((m) => _getMessageId(m) == tempMessageId);
+        if (index >= 0) {
+          _messages[index]['message_id'] = result;
+          // Also update other fields that might come from server
+          _messages[index]['id'] = result;
+        }
+      });
+      print('✅ Message sent with ID: $result (updated from temp: $tempMessageId)');
     }
   }
 
@@ -1278,7 +1812,7 @@ class _ChannelPageState extends State<ChannelPage> {
       final fileId = await DistributedService.uploadFile(
         fileBytes: audioBytes,
         fileName: fileName,
-        workspaceId: widget.workspaceName,
+        workspaceId: _effectiveWorkspaceId,
         uploaderAddress: userAddress!,
         mimeType: 'audio/m4a',
       );
@@ -1323,12 +1857,17 @@ class _ChannelPageState extends State<ChannelPage> {
       print('  - duration: ${msg['duration']} seconds');
       print('  - fileId: ${msg['fileId']}');
 
-      // Add to local state immediately
+      // Generate temporary message ID for local display (will be replaced by server message_id)
+      final tempMessageId = 'temp_voice_${DateTime.now().millisecondsSinceEpoch}_${userAddress}';
+      final messageTimestamp = DateTime.now();
+      
+      // Add to local state immediately with temporary ID
       if (mounted) {
         setState(() {
           _messages.add({
             ...msg,
-            'timestamp': DateTime.now(),
+            'timestamp': messageTimestamp,
+            'message_id': tempMessageId, // Temporary ID for deduplication
           });
           status = fileId != null 
               ? 'Voice message sent! ✓' 
@@ -1344,18 +1883,20 @@ class _ChannelPageState extends State<ChannelPage> {
           ? 'Voice message: $fileName (${_formatDuration(_recordingDuration)})'
           : 'Voice message: $fileName (${_formatDuration(_recordingDuration)}) [Local]';
       
-      final success = await DistributedService.addMessage(
-        workspaceId: widget.workspaceName,
+      // Use HybridStorageService (works offline + P2P)
+      final result = await HybridStorageService.instance.addMessage(
+        workspaceId: _effectiveWorkspaceId,
         channelId: widget.channelName,
         senderAddress: userAddress!,
         messageText: messageText,
         fileId: fileId, // Pass fileId to link message with file
-      ) != null;
+      );
       
+      final success = result != null;
       if (!success) {
         if (mounted) {
           setState(() {
-            _messages.removeLast();
+            _messages.removeWhere((m) => _getMessageId(m) == tempMessageId);
             status = 'Failed to save voice message. Please try again.';
             _isUploading = false;
           });
@@ -3572,6 +4113,62 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
   List<Map<String, dynamic>> _members = [];
   String? _inviterAddress;
   bool _isLoading = true;
+  String? _workspaceId;
+  
+  /// Get workspace ID (resolved from workspace name)
+  String get _effectiveWorkspaceId {
+    return _workspaceId ?? widget.workspaceName;
+  }
+  
+  /// Resolve workspace ID from workspace name
+  Future<void> _resolveWorkspaceId() async {
+    try {
+      if (widget.userAddress == null) return;
+      
+      print('🔍 [ChannelInfo] Resolving workspace ID for workspace name: ${widget.workspaceName}');
+      
+      // Try to get workspace ID from SQLite first (works offline)
+      final sqliteWorkspaces = await HybridStorageService.instance.getUserWorkspaces(widget.userAddress!);
+      final sqliteWorkspace = sqliteWorkspaces.firstWhere(
+        (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+        orElse: () => {},
+      );
+      
+      if (sqliteWorkspace.isNotEmpty) {
+        _workspaceId = sqliteWorkspace['workspace_id']?.toString() ?? 
+                      sqliteWorkspace['workspaceId']?.toString() ??
+                      widget.workspaceName;
+        print('✅ [ChannelInfo] Resolved workspace ID from SQLite: $_workspaceId');
+        return;
+      }
+      
+      // If not in SQLite, try server (if online)
+      try {
+        final serverWorkspaces = await DistributedService.getUserWorkspaces(widget.userAddress!);
+        final serverWorkspace = serverWorkspaces.firstWhere(
+          (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+          orElse: () => {},
+        );
+        
+        if (serverWorkspace.isNotEmpty) {
+          _workspaceId = serverWorkspace['workspace_id']?.toString() ?? 
+                        serverWorkspace['workspaceId']?.toString() ??
+                        widget.workspaceName;
+          print('✅ [ChannelInfo] Resolved workspace ID from server: $_workspaceId');
+          return;
+        }
+      } catch (e) {
+        print('⚠️ [ChannelInfo] Could not resolve workspace ID from server: $e');
+      }
+      
+      // Fallback to workspace name
+      _workspaceId = widget.workspaceName;
+      print('⚠️ [ChannelInfo] Using workspace name as ID (fallback): $_workspaceId');
+    } catch (e) {
+      print('❌ [ChannelInfo] Error resolving workspace ID: $e');
+      _workspaceId = widget.workspaceName; // Fallback
+    }
+  }
   bool _showAllMembers = false;
   
   // Media, Documents, Links
@@ -3590,6 +4187,7 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
   void initState() {
     super.initState();
     _currentChannelName = widget.channelName;
+    _resolveWorkspaceId(); // Resolve workspace ID first
     _loadChannelInfo();
   }
 
@@ -3599,9 +4197,16 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
     });
 
     try {
+      // Ensure workspace ID is resolved
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      
       // Load inviter address
       // Load members from MongoDB
-      final members = await DistributedService.getWorkspaceMembers(widget.workspaceName);
+      // Use HybridStorageService (works offline) with resolved workspace ID
+      print('👥 [ChannelInfo] Loading workspace members for workspace ID: $_effectiveWorkspaceId (name: ${widget.workspaceName})');
+      final members = await HybridStorageService.instance.getWorkspaceMembers(_effectiveWorkspaceId);
       
       if (true) { // Flatten logic structure to minimize diff churn
          _inviterAddress = null; // Not strictly needed for basic member list
@@ -3672,8 +4277,14 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
 
   Future<void> _loadChannelContent() async {
     try {
+      // Ensure workspace ID is resolved
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      final workspaceId = _workspaceId ?? widget.workspaceName;
+      
       final messages = await DistributedService.getChannelMessages(
-          workspaceId: widget.workspaceName, channelId: widget.channelName);
+          workspaceId: workspaceId, channelId: widget.channelName);
 
       // Parse timestamps
       for (var msg in messages) {
@@ -3934,8 +4545,9 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       // Since OrbitDB is append-only, we add a new channel message with updated name
       // The latest channel message with this workspaceName will be used
         // Add updated channel message to MongoDB (as a system message or metadata)
-        final channelUpdateSuccess = await DistributedService.addMessage(
-          workspaceId: widget.workspaceName,
+        // Use HybridStorageService (works offline)
+        final channelUpdateSuccess = await HybridStorageService.instance.addMessage(
+          workspaceId: _effectiveWorkspaceId,
           channelId: 'general', // Use general channel for workspace updates
           senderAddress: widget.userAddress ?? '',
           messageText: 'Channel renamed: $originalDbName -> $newName',
@@ -3977,8 +4589,9 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       
       // Add metadata message to channel (using original DB name for database)
       // Add metadata message to channel
-      final channelMetadataSuccess = await DistributedService.addMessage(
-        workspaceId: widget.workspaceName,
+      // Use HybridStorageService (works offline)
+      final channelMetadataSuccess = await HybridStorageService.instance.addMessage(
+        workspaceId: _effectiveWorkspaceId,
         channelId: originalDbName,
         senderAddress: widget.userAddress ?? '',
         messageText: 'Channel renamed to $newName',
@@ -4271,8 +4884,9 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       print('🗑️ [DeleteChannel] Deleting channel: "$originalDbName" (display: "$displayName")');
       
       // 1. Add channel_delete message to workspace
-      final deleteSuccess = await DistributedService.addMessage(
-          workspaceId: widget.workspaceName,
+      // Use HybridStorageService (works offline)
+      final deleteSuccess = await HybridStorageService.instance.addMessage(
+          workspaceId: _effectiveWorkspaceId,
           channelId: 'general', // Use general channel or system channel for workspace-level events
           senderAddress: widget.userAddress ?? '',
           messageText: 'Channel deleted: $displayName (ID: $originalDbName)',
@@ -4343,8 +4957,9 @@ class _ChannelInfoPageState extends State<ChannelInfoPage> {
       
       // Add metadata message to channel (using original DB name)
       // Add metadata message to channel (using original DB name)
-      await DistributedService.addMessage(
-        workspaceId: widget.workspaceName,
+      // Use HybridStorageService (works offline)
+      await HybridStorageService.instance.addMessage(
+        workspaceId: _effectiveWorkspaceId,
         channelId: originalDbName,
         senderAddress: widget.userAddress ?? '',
         messageText: 'Channel deleted: $displayName',

@@ -4,6 +4,7 @@ const { getCollection, getDb } = require('../utils/db');
 const { validateWorkspace } = require('../middleware/validation');
 const { optionalAuth } = require('../middleware/auth');
 const HashChain = require('../utils/hashChain');
+const GasCalculator = require('../utils/gasCalculator');
 
 /**
  * @route   POST /api/workspaces
@@ -11,6 +12,8 @@ const HashChain = require('../utils/hashChain');
  * @access  Public (add auth later)
  */
 router.post('/', validateWorkspace, async (req, res) => {
+  const startTime = process.hrtime.bigint(); // Start timing
+  
   try {
     const workspacesCollection = getCollection('workspaces');
     const membersCollection = getCollection('members');
@@ -143,7 +146,29 @@ router.post('/', validateWorkspace, async (req, res) => {
       console.log(`✅ Default channel "${channelData.channel_name}" created for workspace ${workspaceId}`);
     }
     
-    console.log(`✅ Workspace created: ${workspaceId}`);
+    // Calculate execution time and gas
+    const endTime = process.hrtime.bigint();
+    const executionTimeMs = Number(endTime - startTime) / 1000000; // Convert nanoseconds to milliseconds
+    
+    // Calculate gas based on execution time
+    const gasUsed = GasCalculator.calculateWorkspaceGas(executionTimeMs, workspaceData);
+    const gasPrice = GasCalculator.getCurrentGasPrice();
+    const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+    
+    // Update workspace with gas information
+    await workspacesCollection.updateOne(
+      { workspace_id: workspaceId },
+      {
+        $set: {
+          gas_used: gasUsed,
+          gas_price: gasPrice,
+          transaction_fee: transactionFee,
+          transaction_time_ms: Math.round(executionTimeMs * 100) / 100
+        }
+      }
+    );
+    
+    console.log(`✅ Workspace created: ${workspaceId} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
     
     return res.status(201).json({
       success: true,
@@ -152,15 +177,30 @@ router.post('/', validateWorkspace, async (req, res) => {
         workspace_id: workspaceId,
         name: workspaceName,
         inviter_address: inviterAddress.toLowerCase().trim(),
-        created_at: timestamp
+        created_at: timestamp,
+        gas_used: gasUsed,
+        gas_price: gasPrice,
+        transaction_fee: transactionFee,
+        transaction_time_ms: Math.round(executionTimeMs * 100) / 100
       }
     });
   } catch (error) {
-    console.error('❌ Create workspace error:', error);
+    // Calculate gas even on error
+    const endTime = process.hrtime.bigint();
+    const executionTimeMs = Number(endTime - startTime) / 1000000;
+    const gasUsed = GasCalculator.calculateWorkspaceGas(executionTimeMs, req.body);
+    const gasPrice = GasCalculator.getCurrentGasPrice();
+    const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+    
+    console.error(`❌ Create workspace error: ${error.message} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
     return res.status(500).json({
       success: false,
       error: 'Failed to create workspace',
-      message: error.message
+      message: error.message,
+      gas_used: gasUsed,
+      gas_price: gasPrice,
+      transaction_fee: transactionFee,
+      transaction_time_ms: Math.round(executionTimeMs * 100) / 100
     });
   }
 });
