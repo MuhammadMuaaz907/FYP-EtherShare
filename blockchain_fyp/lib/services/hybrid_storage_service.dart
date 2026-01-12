@@ -1476,9 +1476,11 @@ class HybridStorageService {
           // means it was deleted on server - mark it as deleted in SQLite
           final sqliteChannelIds = await SQLiteService.instance.getAllChannelIds(workspaceId);
           
-          // Create set of server channel IDs (normalized)
+          // CRITICAL: Server returns display names (channel_name), but we need to compare with channel_id
+          // Backend stores channel_id with spaces replaced by hyphens (e.g., "check 2" -> "check-2")
+          // So we need to normalize display names the same way for comparison
           final serverChannelIds = channels
-              .map((name) => name.toLowerCase().trim())
+              .map((name) => name.toLowerCase().trim().replaceAll(RegExp(r'\s+'), '-'))
               .toSet();
           
           // Find channels that exist in SQLite but NOT in server response
@@ -1514,13 +1516,13 @@ class HybridStorageService {
           
           // Cache ALL active channels from server to SQLite
           // This ensures they are available offline with all metadata
-          // Server returns channel names (strings), but we need to get full channel data
-          // For now, save what we have - full channel objects will be cached when available
+          // Server returns channel names (display names), but we need to normalize them for channel_id
           // CRITICAL: When caching from server, deleted parameter is NOT provided
           // SQLiteService.saveChannel() will preserve existing deleted status if channel already exists
           for (final channelName in channels) {
-            // Normalize channel ID (lowercase for database)
-            final normalizedChannelId = channelName.toLowerCase().trim();
+            // CRITICAL: Normalize channel ID same way as backend (spaces -> hyphens)
+            // Backend uses: channelId.toLowerCase().trim().replace(/\s+/g, '-')
+            final normalizedChannelId = channelName.toLowerCase().trim().replaceAll(RegExp(r'\s+'), '-');
             
             // Save to SQLite with proper display name
             // Note: Full channel data (members, is_private, etc.) will be saved when channel is created
@@ -1528,7 +1530,7 @@ class HybridStorageService {
             // existing deleted status if channel was previously deleted
             await SQLiteService.instance.saveChannel(
               workspaceId: workspaceId,
-              channelId: normalizedChannelId,
+              channelId: normalizedChannelId, // Use normalized ID (spaces -> hyphens)
               channelName: channelName, // Keep original case for display
               creatorAddress: null, // Will be updated if available
               syncedToServer: true, // This came from server

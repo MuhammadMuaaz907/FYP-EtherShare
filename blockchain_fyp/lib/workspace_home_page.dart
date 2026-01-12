@@ -1504,7 +1504,9 @@ class _TeamHomePageState extends State<TeamHomePage> {
         }
       }
       final channelIdForDb = originalChannelName ?? channelName;
-      final normalizedChannelId = channelIdForDb.toLowerCase().trim();
+      // CRITICAL: Normalize channel ID same way as backend (spaces -> hyphens)
+      // Backend uses: channelId.toLowerCase().trim().replace(/\s+/g, '-')
+      final normalizedChannelId = channelIdForDb.toLowerCase().trim().replaceAll(RegExp(r'\s+'), '-');
       
       print('🗑️ [DeleteChannel] Deleting channel: "$channelName" (ID: "$normalizedChannelId")');
       
@@ -1883,7 +1885,9 @@ class _TeamHomePageState extends State<TeamHomePage> {
       }
 
       // Normalize channel name (lowercase for database, but keep original for display)
-      final normalizedChannelName = channelName.toLowerCase().trim();
+      // CRITICAL: Normalize same way as backend (spaces -> hyphens)
+      // Backend uses: channelId.toLowerCase().trim().replace(/\s+/g, '-')
+      final normalizedChannelName = channelName.toLowerCase().trim().replaceAll(RegExp(r'\s+'), '-');
       
       // Validate channel name
       if (normalizedChannelName.isEmpty) {
@@ -1909,7 +1913,11 @@ class _TeamHomePageState extends State<TeamHomePage> {
           },
         );
         
-        if (existingChannels.any((c) => c.toLowerCase().trim() == normalizedChannelName)) {
+        // Compare normalized names (with spaces replaced by hyphens)
+        if (existingChannels.any((c) {
+          final normalizedExisting = c.toLowerCase().trim().replaceAll(RegExp(r'\s+'), '-');
+          return normalizedExisting == normalizedChannelName;
+        })) {
           throw Exception('Channel "$channelName" already exists in this workspace');
         }
       } catch (e) {
@@ -1922,7 +1930,11 @@ class _TeamHomePageState extends State<TeamHomePage> {
           workspaceId: _workspaceId!,
         );
         
-        if (sqliteChannels.any((c) => c.toLowerCase().trim() == normalizedChannelName)) {
+        // Compare normalized names (with spaces replaced by hyphens)
+        if (sqliteChannels.any((c) {
+          final normalizedExisting = c.toLowerCase().trim().replaceAll(RegExp(r'\s+'), '-');
+          return normalizedExisting == normalizedChannelName;
+        })) {
           throw Exception('Channel "$channelName" already exists in this workspace');
         }
       }
@@ -1933,7 +1945,7 @@ class _TeamHomePageState extends State<TeamHomePage> {
       try {
         channelCreated = await DistributedService.createChannel(
           workspaceId: _workspaceId!,
-          channelId: normalizedChannelName,
+          channelId: normalizedChannelName, // Use normalized ID (spaces -> hyphens)
           creatorAddress: userAddress!,
           channelName: channelName, // Keep original case for display
         ).timeout(

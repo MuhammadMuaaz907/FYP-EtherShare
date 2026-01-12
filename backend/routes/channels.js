@@ -484,7 +484,9 @@ router.delete('/:channelId', optionalAuth, async (req, res) => {
       });
     }
     
-    const normalizedChannelId = channelId.toLowerCase().trim();
+    // CRITICAL: Normalize channel ID same way as creation (spaces -> hyphens)
+    // This ensures "check 2" matches "check-2" in database
+    const normalizedChannelId = channelId.toLowerCase().trim().replace(/\s+/g, '-');
     
     // Don't allow deletion of default channels
     const channel = await channelsCollection.findOne({
