@@ -77,9 +77,10 @@ class HybridStorageService {
     // Set up message callback
     P2PService.instance.onMessageReceived = (message) {
       // Message already saved to SQLite by P2P service
-      // Try to sync to server if online
+      // CRITICAL FIX: Only sync to server if message is not already synced
+      // This prevents re-syncing messages that are already on server
       if (_isServerOnline) {
-        _syncMessageToServer(message);
+        _syncMessageToServerIfNeeded(message);
       }
     };
 
@@ -797,9 +798,34 @@ class HybridStorageService {
         );
 
         if (serverMessageId != null) {
-          // Mark as synced
-          await SQLiteService.instance.markMessageSynced(messageId);
-          print('✅ Message saved to server');
+          // CRITICAL FIX: If server returned different messageId, update SQLite message
+          // This prevents duplicates when server messages are cached back
+          if (serverMessageId != messageId) {
+            print('🔄 Server returned different messageId: $messageId -> $serverMessageId');
+            print('   Updating SQLite message to use server messageId to prevent duplicates');
+            
+            try {
+              final updated = await SQLiteService.instance.updateMessageId(
+                oldMessageId: messageId,
+                newMessageId: serverMessageId,
+              );
+              
+              if (updated) {
+                print('✅ Updated SQLite messageId: $messageId -> $serverMessageId');
+                // Return server messageId for consistency
+                return serverMessageId;
+              } else {
+                print('⚠️ Failed to update messageId, keeping original: $messageId');
+              }
+            } catch (e) {
+              print('⚠️ Error updating messageId: $e');
+              // Continue with original messageId
+            }
+          } else {
+            // Message IDs match, just mark as synced
+            await SQLiteService.instance.markMessageSynced(messageId);
+          }
+          print('✅ Message saved to server with ID: ${serverMessageId != messageId ? serverMessageId : messageId}');
         }
       } catch (e) {
         print('⚠️ Server save message failed: $e');
@@ -813,16 +839,47 @@ class HybridStorageService {
   /// Returns messages from server if online and chain is valid
   /// Falls back to SQLite if server is off, chain is broken, or server fails
   /// Throws ChainBrokenException only if chain is broken (to hide messages)
+  /// [sinceTimestamp] - Optional: Only fetch messages after this timestamp (for incremental loading)
   Future<List<Map<String, dynamic>>> getChannelMessages({
     required String workspaceId,
     required String channelId,
+    int? sinceTimestamp, // Only fetch messages after this timestamp (milliseconds)
   }) async {
     List<Map<String, dynamic>> serverMessages = [];
     
     // Try server first if online
+    // CRITICAL FIX: If sinceTimestamp is provided, we're doing incremental load (polling)
+    // In this case, only fetch from server if we need to, otherwise rely on SQLite
     if (_isServerOnline) {
+      // If sinceTimestamp is provided, this is a polling/incremental check
+      // For incremental checks, prefer SQLite first (faster, already has latest messages)
+      // Only fetch from server if we suspect there might be new messages
+      if (sinceTimestamp != null) {
+        print('🔄 Incremental message check: Only fetching new messages since ${DateTime.fromMillisecondsSinceEpoch(sinceTimestamp)}');
+        // For incremental checks, load from SQLite first (P2P messages are already in SQLite)
+        // We'll only check server if SQLite doesn't have recent messages
+        final sqliteMessages = await SQLiteService.instance.getChannelMessages(
+          workspaceId: workspaceId,
+          channelId: channelId,
+          sinceTimestamp: sinceTimestamp,
+        );
+        
+        if (sqliteMessages.isNotEmpty) {
+          print('✅ Found ${sqliteMessages.length} new message(s) in SQLite (since timestamp)');
+          // Convert and return SQLite messages (P2P messages are already here)
+          return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+        }
+        
+        // No new messages in SQLite, check server for new messages
+        // But only if we haven't checked recently (avoid excessive server calls)
+        print('📦 No new messages in SQLite, checking server for new messages...');
+      }
+      
       try {
-        print('🌐 Fetching messages from server for channel $channelId in workspace $workspaceId');
+        print('🌐 Fetching messages from server for channel $channelId in workspace $workspaceId${sinceTimestamp != null ? " (incremental check)" : " (full load)"}');
+        
+        // For incremental checks, we still fetch all from server but filter later
+        // (Server doesn't support sinceTimestamp yet, but we'll filter in SQLite caching)
         serverMessages = await DistributedService.getChannelMessages(
           workspaceId: workspaceId,
           channelId: channelId,
@@ -844,6 +901,40 @@ class HybridStorageService {
         // IMPORTANT: Only cache messages that don't already exist in SQLite
         // This prevents unnecessary re-caching and potential duplication issues
         if (serverMessages.isNotEmpty) {
+          // CRITICAL FIX: For incremental checks (polling), filter server messages by timestamp
+          // Only process messages newer than sinceTimestamp
+          List<Map<String, dynamic>> messagesToProcess = serverMessages;
+          if (sinceTimestamp != null) {
+            messagesToProcess = serverMessages.where((msg) {
+              final msgTimestamp = msg['timestamp'];
+              int msgTs = 0;
+              
+              if (msgTimestamp is int) {
+                msgTs = msgTimestamp;
+              } else if (msgTimestamp is DateTime) {
+                msgTs = msgTimestamp.millisecondsSinceEpoch;
+              } else if (msgTimestamp is String) {
+                final parsed = DateTime.tryParse(msgTimestamp);
+                if (parsed != null) msgTs = parsed.millisecondsSinceEpoch;
+              }
+              
+              return msgTs > sinceTimestamp;
+            }).toList();
+            
+            print('🔍 Filtered server messages: ${serverMessages.length} total -> ${messagesToProcess.length} new (after $sinceTimestamp)');
+            
+            // If no new messages from server, skip caching and return SQLite messages
+            if (messagesToProcess.isEmpty) {
+              print('ℹ️ No new messages from server (all older than sinceTimestamp), using SQLite');
+              final sqliteMessages = await SQLiteService.instance.getChannelMessages(
+                workspaceId: workspaceId,
+                channelId: channelId,
+                sinceTimestamp: sinceTimestamp,
+              );
+              return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+            }
+          }
+          
           // First, check how many messages are already in SQLite
           final existingMessages = await SQLiteService.instance.getChannelMessages(
             workspaceId: workspaceId,
@@ -854,11 +945,11 @@ class HybridStorageService {
               .whereType<String>()
               .toSet();
           
-          print('💾 Checking ${serverMessages.length} server messages against ${existingMessages.length} SQLite messages');
+          print('💾 Checking ${messagesToProcess.length} server messages against ${existingMessages.length} SQLite messages');
           int cached = 0;
           int skipped = 0;
           
-          for (final msg in serverMessages) {
+          for (final msg in messagesToProcess) {
             try {
               // Use message_id from server if available (CRITICAL for deduplication)
               final messageId = msg['message_id']?.toString() ?? 
@@ -870,18 +961,86 @@ class HybridStorageService {
                 continue;
               }
               
-              // Skip if message already exists in SQLite (avoid unnecessary caching)
+              // Skip if message already exists in SQLite by messageId
               if (existingMessageIds.contains(messageId)) {
                 skipped++;
                 continue;
+              }
+              
+              // CRITICAL FIX: Also check for duplicate by content + sender + timestamp
+              // This catches duplicates even if messageIds don't match
+              final messageText = msg['message_text']?.toString() ?? msg['messageText']?.toString() ?? '';
+              final senderAddress = msg['sender_address']?.toString() ?? msg['senderAddress']?.toString() ?? '';
+              final msgTimestamp = msg['timestamp'];
+              
+              // Check for duplicate by content + sender + timestamp (within 5 seconds tolerance)
+              bool isDuplicate = false;
+              if (messageText.isNotEmpty && senderAddress.isNotEmpty) {
+                for (final existingMsg in existingMessages) {
+                  final existingText = existingMsg['message_text']?.toString() ?? '';
+                  final existingSender = existingMsg['sender_address']?.toString() ?? '';
+                  final existingTimestamp = existingMsg['timestamp'];
+                  
+                  // Check if content and sender match
+                  if (existingText == messageText && 
+                      existingSender.toLowerCase() == senderAddress.toLowerCase()) {
+                    // Check timestamp (within 5 seconds tolerance for same message)
+                    int existingTs = 0;
+                    int msgTs = 0;
+                    
+                    if (existingTimestamp is int) {
+                      existingTs = existingTimestamp;
+                    } else if (existingTimestamp is DateTime) {
+                      existingTs = existingTimestamp.millisecondsSinceEpoch;
+                    }
+                    
+                    if (msgTimestamp is int) {
+                      msgTs = msgTimestamp;
+                    } else if (msgTimestamp is DateTime) {
+                      msgTs = msgTimestamp.millisecondsSinceEpoch;
+                    } else if (msgTimestamp is String) {
+                      final parsed = DateTime.tryParse(msgTimestamp);
+                      if (parsed != null) msgTs = parsed.millisecondsSinceEpoch;
+                    }
+                    
+                    // If timestamps are within 5 seconds, it's likely the same message
+                    if (existingTs > 0 && msgTs > 0 && (existingTs - msgTs).abs() < 5000) {
+                      print('⚠️ Duplicate message detected by content: "$messageText" from $senderAddress');
+                      print('   Existing ID: ${existingMsg['message_id']}, Server ID: $messageId');
+                      print('   Updating existing message with server messageId to prevent duplicates');
+                      
+                      // Update existing message with server messageId for consistency
+                      try {
+                        final updated = await SQLiteService.instance.updateMessageId(
+                          oldMessageId: existingMsg['message_id']?.toString() ?? '',
+                          newMessageId: messageId,
+                        );
+                        if (updated) {
+                          print('✅ Updated existing message with server messageId: $messageId');
+                          existingMessageIds.add(messageId); // Track updated message
+                        }
+                      } catch (e) {
+                        print('⚠️ Error updating messageId: $e');
+                      }
+                      
+                      isDuplicate = true;
+                      skipped++;
+                      break;
+                    }
+                  }
+                }
+              }
+              
+              if (isDuplicate) {
+                continue; // Skip adding duplicate message
               }
               
               // Only cache messages that don't already exist
               final result = await SQLiteService.instance.addMessage(
                 workspaceId: workspaceId,
                 channelId: channelId,
-                senderAddress: msg['sender_address'] ?? msg['senderAddress'] ?? '',
-                messageText: msg['message_text'] ?? msg['messageText'] ?? '',
+                senderAddress: senderAddress,
+                messageText: messageText,
                 fileId: msg['file_id'] ?? msg['fileId'],
                 providedMessageId: messageId, // CRITICAL: Pass server message_id to prevent duplicates
               );
@@ -918,62 +1077,21 @@ class HybridStorageService {
         print('📦 Server messages cached to SQLite, loading from SQLite to prevent duplication...');
         
         // Load from SQLite (which now includes server messages + P2P messages)
+        // For incremental checks, only load new messages
         final sqliteMessages = await SQLiteService.instance.getChannelMessages(
           workspaceId: workspaceId,
           channelId: channelId,
+          sinceTimestamp: sinceTimestamp, // Only get new messages if sinceTimestamp provided
         );
         
-        print('✅ SQLite returned ${sqliteMessages.length} messages (includes server + P2P)');
-        
-        // Convert SQLite format to UI format
-        final convertedMessages = sqliteMessages.map((msg) {
-          // Handle timestamp conversion
-          dynamic timestamp = msg['timestamp'];
-          DateTime dateTime;
-          if (timestamp is int) {
-            dateTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
-          } else if (timestamp is String) {
-            dateTime = DateTime.tryParse(timestamp) ?? DateTime.now();
-          } else if (timestamp is DateTime) {
-            dateTime = timestamp;
-          } else {
-            dateTime = DateTime.now();
-          }
-          
-          return {
-            'message_id': msg['message_id'],
-            'messageText': msg['message_text'] ?? msg['messageText'] ?? '',
-            'message_text': msg['message_text'] ?? msg['messageText'] ?? '',
-            'sender_address': msg['sender_address'] ?? msg['senderAddress'] ?? '',
-            'senderAddress': msg['sender_address'] ?? msg['senderAddress'] ?? '',
-            'receiver_address': msg['receiver_address'] ?? msg['receiverAddress'],
-            'receiverAddress': msg['receiver_address'] ?? msg['receiverAddress'],
-            'workspace_id': msg['workspace_id'] ?? msg['workspaceId'] ?? workspaceId,
-            'workspaceId': msg['workspace_id'] ?? msg['workspaceId'] ?? workspaceId,
-            'channel_id': msg['channel_id'] ?? msg['channelId'] ?? channelId,
-            'channelId': msg['channel_id'] ?? msg['channelId'] ?? channelId,
-            'file_id': msg['file_id'] ?? msg['fileId'],
-            'fileId': msg['file_id'] ?? msg['fileId'],
-            'timestamp': dateTime,
-            'sender': msg['sender_address'] ?? msg['senderAddress'] ?? '',
-            'senderName': msg['sender_address'] ?? msg['senderAddress'] ?? '',
-            'content': msg['message_text'] ?? msg['messageText'] ?? '',
-            'type': 'text',
-            'userAddress': msg['sender_address'] ?? msg['senderAddress'] ?? '',
-          };
-        }).toList();
-        
-        // Log if server returned empty but SQLite has messages
-        if (serverMessages.isEmpty && sqliteMessages.isNotEmpty) {
-          print('⚠️ Server returned empty messages but SQLite has ${sqliteMessages.length} cached messages');
-          print('   This might indicate:');
-          print('   1. Server database is empty for this channel');
-          print('   2. Workspace/channel ID mismatch');
-          print('   3. Server query issue');
-          print('   💡 Using SQLite messages (includes P2P messages)');
+        if (sinceTimestamp != null) {
+          print('✅ SQLite returned ${sqliteMessages.length} new message(s) (since timestamp)');
+        } else {
+          print('✅ SQLite returned ${sqliteMessages.length} messages (includes server + P2P)');
         }
         
-        return convertedMessages;
+        // Convert SQLite format to UI format
+        return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
       } on ChainBrokenException catch (e) {
         // Chain is broken - this channel's integrity is compromised
         print('❌ Chain broken for channel $channelId - hiding messages');
@@ -990,13 +1108,22 @@ class HybridStorageService {
     }
 
     // Fallback to SQLite (when server is off, or server failed, or no server messages)
-    print('📦 Loading messages from SQLite for channel $channelId');
+    if (sinceTimestamp != null) {
+      print('📦 Loading new messages from SQLite for channel $channelId (since timestamp)');
+    } else {
+      print('📦 Loading messages from SQLite for channel $channelId');
+    }
     final sqliteMessages = await SQLiteService.instance.getChannelMessages(
       workspaceId: workspaceId,
       channelId: channelId,
+      sinceTimestamp: sinceTimestamp, // Only get new messages if sinceTimestamp provided
     );
     
-    print('✅ SQLite returned ${sqliteMessages.length} messages');
+    if (sinceTimestamp != null) {
+      print('✅ SQLite returned ${sqliteMessages.length} new message(s) (since timestamp)');
+    } else {
+      print('✅ SQLite returned ${sqliteMessages.length} messages');
+    }
     
     // Debug: Log first SQLite message if available
     if (sqliteMessages.isNotEmpty) {
@@ -1004,6 +1131,15 @@ class HybridStorageService {
       print('📋 First SQLite message_text: ${sqliteMessages.first['message_text']}');
     }
     
+    return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+  }
+
+  /// Convert SQLite messages to UI format (helper method)
+  List<Map<String, dynamic>> _convertSQLiteMessages(
+    List<Map<String, dynamic>> sqliteMessages,
+    String workspaceId,
+    String channelId,
+  ) {
     // Convert SQLite format to UI format
     final convertedMessages = sqliteMessages.map((msg) {
       // Handle timestamp conversion
@@ -1041,10 +1177,6 @@ class HybridStorageService {
         'userAddress': msg['sender_address'] ?? msg['senderAddress'] ?? '',
       };
     }).toList();
-    
-    if (convertedMessages.isEmpty && serverMessages.isEmpty) {
-      print('⚠️ No messages found in SQLite or server for channel $channelId');
-    }
     
     return convertedMessages;
   }
@@ -1118,9 +1250,30 @@ class HybridStorageService {
       // Get unsynced messages
       final unsyncedMessages = await SQLiteService.instance.getUnsyncedMessages();
 
+      if (unsyncedMessages.isEmpty) {
+        print('ℹ️ No unsynced messages to sync');
+        return;
+      }
+
+      print('📤 Found ${unsyncedMessages.length} unsynced message(s) to sync');
+
+      int syncedCount = 0;
       for (final msg in unsyncedMessages) {
         try {
-          final messageId = await DistributedService.addMessage(
+          final localMessageId = msg['message_id'] as String?;
+          if (localMessageId == null || localMessageId.isEmpty) {
+            print('⚠️ Skipping message without messageId');
+            continue;
+          }
+
+          // Double-check if message is already synced (race condition protection)
+          final isSynced = await SQLiteService.instance.isMessageSynced(localMessageId);
+          if (isSynced) {
+            print('ℹ️ Message $localMessageId already synced, skipping');
+            continue;
+          }
+
+          final serverMessageId = await DistributedService.addMessage(
             workspaceId: msg['workspace_id'] ?? '',
             channelId: msg['channel_id'],
             senderAddress: msg['sender_address'] ?? '',
@@ -1129,34 +1282,74 @@ class HybridStorageService {
             fileId: msg['file_id'],
           );
 
-          if (messageId != null) {
-            await SQLiteService.instance.markMessageSynced(msg['message_id'] as String);
-            print('✅ Synced message: ${msg['message_id']}');
+          if (serverMessageId != null) {
+            // Update SQLite message with server messageId if different
+            if (serverMessageId != localMessageId) {
+              await SQLiteService.instance.updateMessageId(
+                oldMessageId: localMessageId,
+                newMessageId: serverMessageId,
+              );
+              print('✅ Synced and updated messageId: $localMessageId -> $serverMessageId');
+            } else {
+              await SQLiteService.instance.markMessageSynced(localMessageId);
+              print('✅ Synced message: $localMessageId');
+            }
+            syncedCount++;
           }
         } catch (e) {
           print('⚠️ Sync message error: $e');
         }
       }
 
-      print('✅ Sync completed: ${unsyncedMessages.length} messages');
+      print('✅ Sync completed: $syncedCount/${unsyncedMessages.length} messages synced');
     } catch (e) {
       print('❌ Sync to server error: $e');
     }
   }
 
-  /// Sync message to server (internal)
-  Future<void> _syncMessageToServer(Map<String, dynamic> message) async {
+  /// Sync message to server (internal) - only if not already synced
+  Future<void> _syncMessageToServerIfNeeded(Map<String, dynamic> message) async {
     if (!_isServerOnline) {
       return;
     }
 
     try {
-      await DistributedService.addMessage(
+      final messageId = message['message_id']?.toString();
+      if (messageId == null || messageId.isEmpty) {
+        print('⚠️ Cannot sync message without messageId');
+        return;
+      }
+
+      // CRITICAL FIX: Check if message is already synced before syncing
+      final isSynced = await SQLiteService.instance.isMessageSynced(messageId);
+      if (isSynced) {
+        print('ℹ️ Message $messageId already synced, skipping');
+        return;
+      }
+
+      print('🔄 Syncing message $messageId to server...');
+      final serverMessageId = await DistributedService.addMessage(
         workspaceId: message['workspace_id'] ?? '',
+        channelId: message['channel_id'],
         senderAddress: message['sender_address'] ?? '',
         receiverAddress: message['receiver_address'],
-        messageText: message['content'] ?? '',
+        messageText: message['content'] ?? message['message_text'] ?? '',
+        fileId: message['file_id'],
       );
+
+      if (serverMessageId != null) {
+        // Update SQLite message with server messageId if different
+        if (serverMessageId != messageId) {
+          await SQLiteService.instance.updateMessageId(
+            oldMessageId: messageId,
+            newMessageId: serverMessageId,
+          );
+          print('✅ Updated messageId: $messageId -> $serverMessageId');
+        } else {
+          await SQLiteService.instance.markMessageSynced(messageId);
+        }
+        print('✅ Message synced to server: $serverMessageId');
+      }
     } catch (e) {
       print('⚠️ Sync message to server error: $e');
     }
@@ -1278,22 +1471,68 @@ class HybridStorageService {
             print('✅ Server is actually online (health check was false negative)');
           }
           
-          // Cache ALL channels to SQLite with complete MongoDB data
+          // CRITICAL: Sync deleted channels from server to SQLite
+          // When server returns channels, any channel that exists in SQLite but NOT in server response
+          // means it was deleted on server - mark it as deleted in SQLite
+          final sqliteChannelIds = await SQLiteService.instance.getAllChannelIds(workspaceId);
+          
+          // Create set of server channel IDs (normalized)
+          final serverChannelIds = channels
+              .map((name) => name.toLowerCase().trim())
+              .toSet();
+          
+          // Find channels that exist in SQLite but NOT in server response
+          // These are channels that were deleted on server
+          final channelsToDelete = sqliteChannelIds
+              .where((channelId) => !serverChannelIds.contains(channelId))
+              .where((channelId) => 
+                  // Don't delete default channels
+                  channelId != 'general' && channelId != 'random')
+              .toList();
+          
+          // Mark deleted channels in SQLite
+          for (final channelId in channelsToDelete) {
+            // Check if channel is already deleted
+            final db = await SQLiteService.instance.database;
+            final existingChannel = await db.query(
+              'channels',
+              columns: ['deleted'],
+              where: 'workspace_id = ? AND channel_id = ?',
+              whereArgs: [workspaceId, channelId],
+              limit: 1,
+            );
+            
+            // Only mark as deleted if not already deleted
+            if (existingChannel.isNotEmpty && (existingChannel.first['deleted'] as int? ?? 0) == 0) {
+              await SQLiteService.instance.deleteChannel(
+                workspaceId: workspaceId,
+                channelId: channelId,
+              );
+              print('🗑️ Synced deleted channel from server to SQLite: $channelId');
+            }
+          }
+          
+          // Cache ALL active channels from server to SQLite
           // This ensures they are available offline with all metadata
           // Server returns channel names (strings), but we need to get full channel data
           // For now, save what we have - full channel objects will be cached when available
+          // CRITICAL: When caching from server, deleted parameter is NOT provided
+          // SQLiteService.saveChannel() will preserve existing deleted status if channel already exists
           for (final channelName in channels) {
             // Normalize channel ID (lowercase for database)
             final normalizedChannelId = channelName.toLowerCase().trim();
             
             // Save to SQLite with proper display name
             // Note: Full channel data (members, is_private, etc.) will be saved when channel is created
+            // IMPORTANT: deleted parameter is NOT passed - this allows SQLiteService to preserve
+            // existing deleted status if channel was previously deleted
             await SQLiteService.instance.saveChannel(
               workspaceId: workspaceId,
               channelId: normalizedChannelId,
               channelName: channelName, // Keep original case for display
               creatorAddress: null, // Will be updated if available
               syncedToServer: true, // This came from server
+              // deleted parameter NOT provided - SQLiteService will preserve existing deleted status
             );
             print('✅ Cached channel to SQLite: $channelName (ID: $normalizedChannelId)');
           }
@@ -1389,6 +1628,50 @@ class HybridStorageService {
       channelName: channelName,
       creatorAddress: creatorAddress,
     );
+  }
+
+  /// Delete channel (from server and SQLite)
+  Future<bool> deleteChannel({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      print('🗑️ [HybridStorageService] Deleting channel: $channelId in workspace $workspaceId');
+      
+      // 1. Try to delete from server if online
+      if (_isServerOnline) {
+        try {
+          final success = await DistributedService.deleteChannel(
+            workspaceId: workspaceId,
+            channelId: channelId,
+          );
+          if (success) {
+            print('✅ Channel deleted from server: $channelId');
+          }
+        } catch (e) {
+          print('⚠️ Server delete failed (may be offline or channel already deleted): $e');
+          // Continue to SQLite deletion even if server fails
+        }
+      }
+      
+      // 2. Always delete from SQLite (works offline)
+      final sqliteSuccess = await SQLiteService.instance.deleteChannel(
+        workspaceId: workspaceId,
+        channelId: channelId,
+      );
+      
+      if (sqliteSuccess) {
+        print('✅ Channel deleted from SQLite: $channelId');
+        return true;
+      } else {
+        print('⚠️ Channel not found in SQLite (may already be deleted): $channelId');
+        // Still return true if server deletion succeeded
+        return _isServerOnline;
+      }
+    } catch (e) {
+      print('❌ Error deleting channel: $e');
+      return false;
+    }
   }
 
   /// Get peer info

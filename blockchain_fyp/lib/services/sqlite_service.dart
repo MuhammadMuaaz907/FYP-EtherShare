@@ -606,9 +606,11 @@ class SQLiteService {
   }
 
   /// Get channel messages
+  /// [sinceTimestamp] - Optional: Only fetch messages after this timestamp (for incremental loading)
   Future<List<Map<String, dynamic>>> getChannelMessages({
     required String workspaceId,
     required String channelId,
+    int? sinceTimestamp, // Only fetch messages after this timestamp (milliseconds)
   }) async {
     try {
       final db = await database;
@@ -616,11 +618,21 @@ class SQLiteService {
       // Normalize channel ID for query (case-insensitive)
       final normalizedChannelId = channelId.toLowerCase().trim();
       
+      // Build WHERE clause
+      String whereClause = 'workspace_id = ? AND (channel_id = ? OR LOWER(channel_id) = ?)';
+      List<dynamic> whereArgs = [workspaceId, channelId, normalizedChannelId];
+      
+      // Add timestamp filter if provided (for incremental loading)
+      if (sinceTimestamp != null) {
+        whereClause += ' AND timestamp > ?';
+        whereArgs.add(sinceTimestamp);
+      }
+      
       // Query messages - try exact match first, then case-insensitive
       final messages = await db.query(
         'messages',
-        where: 'workspace_id = ? AND (channel_id = ? OR LOWER(channel_id) = ?)',
-        whereArgs: [workspaceId, channelId, normalizedChannelId],
+        where: whereClause,
+        whereArgs: whereArgs,
         orderBy: 'timestamp ASC',
       );
 
@@ -778,6 +790,69 @@ class SQLiteService {
     }
   }
 
+  /// Update message ID (when server returns different ID)
+  Future<bool> updateMessageId({
+    required String oldMessageId,
+    required String newMessageId,
+  }) async {
+    try {
+      final db = await database;
+      
+      // Check if new messageId already exists
+      final existing = await db.query(
+        'messages',
+        columns: ['message_id'],
+        where: 'message_id = ?',
+        whereArgs: [newMessageId],
+        limit: 1,
+      );
+      
+      if (existing.isNotEmpty) {
+        print('⚠️ Message with new ID $newMessageId already exists, deleting old message: $oldMessageId');
+        // Delete old message if new one already exists
+        await db.delete(
+          'messages',
+          where: 'message_id = ?',
+          whereArgs: [oldMessageId],
+        );
+        return true;
+      }
+      
+      // Update message ID
+      await db.update(
+        'messages',
+        {'message_id': newMessageId, 'synced_to_server': 1},
+        where: 'message_id = ?',
+        whereArgs: [oldMessageId],
+      );
+      print('✅ Updated message ID: $oldMessageId -> $newMessageId');
+      return true;
+    } catch (e) {
+      print('❌ Update message ID error: $e');
+      return false;
+    }
+  }
+
+  /// Check if message is already synced
+  Future<bool> isMessageSynced(String messageId) async {
+    try {
+      final db = await database;
+      final result = await db.query(
+        'messages',
+        columns: ['synced_to_server'],
+        where: 'message_id = ?',
+        whereArgs: [messageId],
+        limit: 1,
+      );
+      
+      if (result.isEmpty) return false;
+      return (result.first['synced_to_server'] as int? ?? 0) == 1;
+    } catch (e) {
+      print('❌ Check message synced error: $e');
+      return false;
+    }
+  }
+
   // ============ CHAIN VERIFICATION ============
 
   /// Verify chain integrity
@@ -912,6 +987,18 @@ class SQLiteService {
         WHERE workspace_id = ? AND channel_id IS NOT NULL AND channel_id != ''
       ''', [workspaceId]);
       
+      // CRITICAL: Get list of deleted channel IDs to exclude them from messages
+      final deletedChannels = await db.query(
+        'channels',
+        columns: ['channel_id'],
+        where: 'workspace_id = ? AND deleted = 1',
+        whereArgs: [workspaceId],
+      );
+      final deletedChannelIds = deletedChannels
+          .map((ch) => ch['channel_id']?.toString().toLowerCase().trim())
+          .whereType<String>()
+          .toSet();
+      
       final channelSet = <String>{};
       
       // Add channels from channels table (prioritize channel_name for display)
@@ -930,9 +1017,18 @@ class SQLiteService {
       }
       
       // Add channels from messages (for channels that might not be in channels table yet)
+      // BUT EXCLUDE deleted channels (channels that are marked as deleted in channels table)
       for (final ch in messageChannels) {
         final channelId = ch['channel_id']?.toString();
         if (channelId != null && channelId.isNotEmpty) {
+          final normalizedChannelId = channelId.toLowerCase().trim();
+          
+          // Skip if this channel is marked as deleted in channels table
+          if (deletedChannelIds.contains(normalizedChannelId)) {
+            print('🚫 Skipping deleted channel from messages: $channelId');
+            continue;
+          }
+          
           // Capitalize first letter
           final capitalized = channelId.substring(0, 1).toUpperCase() + 
                              (channelId.length > 1 ? channelId.substring(1) : '');
@@ -984,6 +1080,28 @@ class SQLiteService {
       final defaultChannels = ['general', 'random'];
       final isDefaultChannel = isDefault ?? defaultChannels.contains(normalizedChannelId);
       
+      // CRITICAL: Check if channel already exists and is deleted
+      // If deleted flag is not explicitly provided, preserve existing deleted status
+      bool shouldMarkDeleted = deleted ?? false;
+      if (deleted == null) {
+        // deleted parameter not provided - check existing channel status
+        final existingChannel = await db.query(
+          'channels',
+          where: 'workspace_id = ? AND channel_id = ?',
+          whereArgs: [workspaceId, normalizedChannelId],
+          limit: 1,
+        );
+        
+        if (existingChannel.isNotEmpty) {
+          final existingDeleted = (existingChannel.first['deleted'] as int? ?? 0) == 1;
+          if (existingDeleted) {
+            // Channel is already deleted - preserve deleted status
+            shouldMarkDeleted = true;
+            print('🛡️ Preserving deleted status for channel: $channelId (was already deleted)');
+          }
+        }
+      }
+      
       // Prepare channel data (MongoDB-aligned)
       final channelData = {
         'channel_id': channelId,
@@ -997,7 +1115,7 @@ class SQLiteService {
         'timestamp': timestamp ?? now,
         'previous_hash': previousHash,
         'current_hash': currentHash,
-        'deleted': (deleted ?? false) ? 1 : 0,
+        'deleted': shouldMarkDeleted ? 1 : 0,  // Use preserved deleted status
         'synced_to_server': (syncedToServer ?? false) ? 1 : 0,
       };
       
@@ -1007,7 +1125,7 @@ class SQLiteService {
           channelData,
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
-        print('✅ Channel saved to SQLite: $channelName (ID: $channelId)');
+        print('✅ Channel saved to SQLite: $channelName (ID: $channelId, deleted: $shouldMarkDeleted)');
         return true;
       } catch (e) {
         // Table might not exist or schema mismatch, try to create/upgrade
@@ -1073,6 +1191,61 @@ class SQLiteService {
     } catch (e) {
       print('❌ Save channel error: $e');
       return false;
+    }
+  }
+
+  /// Delete channel (soft delete - mark as deleted)
+  Future<bool> deleteChannel({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      final db = await database;
+      final normalizedChannelId = channelId.toLowerCase().trim();
+      
+      // Update channel to mark as deleted
+      final rowsAffected = await db.update(
+        'channels',
+        {
+          'deleted': 1,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        },
+        where: 'workspace_id = ? AND channel_id = ?',
+        whereArgs: [workspaceId, normalizedChannelId],
+      );
+      
+      if (rowsAffected > 0) {
+        print('✅ Channel deleted from SQLite: $channelId in workspace $workspaceId');
+        return true;
+      } else {
+        print('⚠️ Channel not found in SQLite: $channelId in workspace $workspaceId');
+        return false;
+      }
+    } catch (e) {
+      print('❌ Delete channel from SQLite error: $e');
+      return false;
+    }
+  }
+
+  /// Get all channel IDs for a workspace (including deleted ones)
+  /// Used for syncing deleted channels from server
+  Future<List<String>> getAllChannelIds(String workspaceId) async {
+    try {
+      final db = await database;
+      final channels = await db.query(
+        'channels',
+        columns: ['channel_id'],
+        where: 'workspace_id = ?',
+        whereArgs: [workspaceId],
+      );
+      
+      return channels
+          .map((ch) => (ch['channel_id']?.toString() ?? '').toLowerCase().trim())
+          .where((id) => id.isNotEmpty)
+          .toList();
+    } catch (e) {
+      print('❌ Get all channel IDs error: $e');
+      return [];
     }
   }
 

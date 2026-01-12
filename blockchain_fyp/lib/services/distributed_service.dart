@@ -1019,6 +1019,42 @@ class DistributedService {
     }
   }
 
+  /// Delete channel from workspace
+  static Future<bool> deleteChannel({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      final url = Uri.parse('$baseUrl/api/channels/${Uri.encodeComponent(channelId)}?workspaceId=${Uri.encodeComponent(workspaceId)}');
+      
+      final response = await http.delete(
+        url,
+        headers: headers,
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        print('✅ Channel "$channelId" deleted successfully');
+        return data['success'] ?? true;
+      } else if (response.statusCode == 403) {
+        final errorData = jsonDecode(response.body);
+        print('❌ Cannot delete default channels: ${errorData['error']}');
+        throw Exception(errorData['error'] ?? 'Cannot delete default channels');
+      } else if (response.statusCode == 404) {
+        final errorData = jsonDecode(response.body);
+        print('❌ Channel not found: ${errorData['error']}');
+        throw Exception(errorData['error'] ?? 'Channel not found');
+      } else {
+        final errorData = jsonDecode(response.body);
+        print('❌ Failed to delete channel: ${errorData['error']}');
+        throw Exception(errorData['error'] ?? 'Failed to delete channel');
+      }
+    } catch (e) {
+      print('❌ Error deleting channel: $e');
+      rethrow;
+    }
+  }
+
   /// Get all channels for a workspace
   static Future<List<String>> getWorkspaceChannels({
     required String workspaceId,

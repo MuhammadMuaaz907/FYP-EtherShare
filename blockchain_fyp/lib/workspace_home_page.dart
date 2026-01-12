@@ -49,6 +49,9 @@ class _TeamHomePageState extends State<TeamHomePage> {
   // Real-time channel updates
   Timer? _channelPollingTimer;
   bool _isCheckingChannels = false;
+  
+  // Track which channel is showing delete icon (long pressed)
+  String? _channelWithDeleteIcon;
 
   @override
   void initState() {
@@ -1312,29 +1315,53 @@ class _TeamHomePageState extends State<TeamHomePage> {
   }
 
   Widget _channelTile(String name, {Widget? trailing}) {
-    return ListTile(
-      leading: const Icon(Icons.tag, color: Color(0xFF0F365F)),
-      title: Text(
-        name,
-        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  fontFamily: 'Inter',
-                  color: Colors.black,
-                  fontSize: 16,
-                  letterSpacing: 0.0,
-                ) ??
-            const TextStyle(
-              color: Colors.black,
-              fontSize: 16,
-            ),
-      ),
-      trailing: trailing != null
-          ? ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 100),
-              child: trailing,
-            )
-          : null,
-      onTap: () async {
-        final channel = name.replaceAll('#', '').trim();
+    final isDefaultChannel = name.toLowerCase() == 'general' || name.toLowerCase() == 'random';
+    final showDeleteIcon = _channelWithDeleteIcon == name && !isDefaultChannel;
+    
+    return GestureDetector(
+      onLongPress: () {
+        if (!isDefaultChannel) {
+          setState(() {
+            _channelWithDeleteIcon = name;
+          });
+        }
+      },
+      child: ListTile(
+        leading: const Icon(Icons.tag, color: Color(0xFF0F365F)),
+        title: Text(
+          name,
+          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    fontFamily: 'Inter',
+                    color: Colors.black,
+                    fontSize: 16,
+                    letterSpacing: 0.0,
+                  ) ??
+              const TextStyle(
+                color: Colors.black,
+                fontSize: 16,
+              ),
+        ),
+        trailing: showDeleteIcon
+            ? IconButton(
+                icon: const Icon(Icons.delete, color: Colors.red, size: 22),
+                onPressed: () => _deleteChannel(name),
+                tooltip: 'Delete channel',
+              )
+            : (trailing != null
+                ? ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 100),
+                    child: trailing,
+                  )
+                : null),
+        onTap: () async {
+          // Hide delete icon if shown (but still allow navigation)
+          if (_channelWithDeleteIcon == name) {
+            setState(() {
+              _channelWithDeleteIcon = null;
+            });
+          }
+          
+          final channel = name.replaceAll('#', '').trim();
         final channelLower = channel.toLowerCase();
         
         // Resolve to original channel name if it was renamed
@@ -1422,7 +1449,151 @@ class _TeamHomePageState extends State<TeamHomePage> {
           }
         }
       },
+      ),
     );
+  }
+
+  /// Delete channel - Remove from server, SQLite, and clean up all related data
+  Future<void> _deleteChannel(String channelName) async {
+    try {
+      // Hide delete icon immediately
+      setState(() {
+        _channelWithDeleteIcon = null;
+      });
+      
+      // Prevent deletion of default channels
+      final channelLower = channelName.toLowerCase().trim();
+      if (channelLower == 'general' || channelLower == 'random') {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Default channels (General, Random) cannot be deleted'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+      
+      // Resolve workspace ID
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      final effectiveWorkspaceId = _workspaceId ?? widget.workspaceName;
+      
+      // Resolve original channel name if renamed
+      var originalChannelName = _displayToOriginalName[channelLower];
+      if (originalChannelName == null) {
+        final prefs = await SharedPreferences.getInstance();
+        final reverseMappingKey = 'channel_old_name_${widget.workspaceName}_$channelName';
+        originalChannelName = prefs.getString(reverseMappingKey);
+        
+        if (originalChannelName == null) {
+          final mappingPrefix = 'channel_name_mapping_${widget.workspaceName}_';
+          final allKeys = prefs.getKeys();
+          for (var key in allKeys) {
+            if (key.startsWith(mappingPrefix)) {
+              final mappedName = prefs.getString(key);
+              if (mappedName != null && mappedName.toLowerCase() == channelLower) {
+                originalChannelName = key.substring(mappingPrefix.length);
+                break;
+              }
+            }
+          }
+        }
+      }
+      final channelIdForDb = originalChannelName ?? channelName;
+      final normalizedChannelId = channelIdForDb.toLowerCase().trim();
+      
+      print('🗑️ [DeleteChannel] Deleting channel: "$channelName" (ID: "$normalizedChannelId")');
+      
+      // 1. Delete from server and SQLite using HybridStorageService
+      final deleteSuccess = await HybridStorageService.instance.deleteChannel(
+        workspaceId: effectiveWorkspaceId,
+        channelId: normalizedChannelId,
+      );
+      
+      if (!deleteSuccess) {
+        throw Exception('Failed to delete channel from server or SQLite');
+      }
+      
+      // 2. Clean up SharedPreferences mappings
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Remove forward mapping (original -> display)
+      final mappingKey = 'channel_name_mapping_${widget.workspaceName}_$normalizedChannelId';
+      await prefs.remove(mappingKey);
+      print('🗑️ [DeleteChannel] Removed forward mapping: $mappingKey');
+      
+      // Remove reverse mapping (display -> original)
+      final reverseMappingKey = 'channel_old_name_${widget.workspaceName}_$channelName';
+      await prefs.remove(reverseMappingKey);
+      print('🗑️ [DeleteChannel] Removed reverse mapping: $reverseMappingKey');
+      
+      // Also check if there are any other mappings for this channel (in case of multiple renames)
+      final mappingPrefix = 'channel_name_mapping_${widget.workspaceName}_';
+      final oldNamePrefix = 'channel_old_name_${widget.workspaceName}_';
+      final allKeys = prefs.getKeys();
+      
+      for (var key in allKeys) {
+        if (key.startsWith(mappingPrefix)) {
+          final mappedValue = prefs.getString(key);
+          if (mappedValue != null && 
+              (mappedValue.toLowerCase() == channelName.toLowerCase() ||
+               mappedValue.toLowerCase() == normalizedChannelId)) {
+            await prefs.remove(key);
+            print('🗑️ [DeleteChannel] Removed related mapping: $key');
+          }
+        } else if (key.startsWith(oldNamePrefix)) {
+          final mappedValue = prefs.getString(key);
+          if (mappedValue != null && 
+              (mappedValue.toLowerCase() == normalizedChannelId ||
+               mappedValue.toLowerCase() == channelName.toLowerCase())) {
+            await prefs.remove(key);
+            print('🗑️ [DeleteChannel] Removed related reverse mapping: $key');
+          }
+        }
+      }
+      
+      // 3. Remove notification and mute preferences
+      final notificationsKey = 'channel_notifications_${widget.workspaceName}_$channelName';
+      final muteKey = 'channel_muted_${widget.workspaceName}_$channelName';
+      await prefs.remove(notificationsKey);
+      await prefs.remove(muteKey);
+      print('🗑️ [DeleteChannel] Removed notification preferences');
+      
+      // 4. Remove from in-memory mapping
+      _displayToOriginalName.remove(channelLower);
+      
+      // 5. Reload channels list
+      await _loadChannels();
+      
+      print('✅ [DeleteChannel] Channel deleted successfully: "$channelName"');
+      
+      // Show success message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Channel "# $channelName" has been deleted'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Error deleting channel: $e');
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting channel: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
   }
 
   Widget _addChannelTile() {
@@ -1563,10 +1734,12 @@ class _TeamHomePageState extends State<TeamHomePage> {
                 FilledButton(
                   onPressed: isLoading
                       ? null
-                      : () async {
-                          final channelName =
-                              channelController.text.trim().toLowerCase();
-                          if (channelName.isEmpty) {
+                        : () async {
+                          // Get original channel name (preserve case)
+                          final originalChannelName = channelController.text.trim();
+                          final normalizedInput = originalChannelName.toLowerCase().trim();
+                          
+                          if (normalizedInput.isEmpty) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
                                 content: Text('Please enter a channel name'),
@@ -1577,7 +1750,6 @@ class _TeamHomePageState extends State<TeamHomePage> {
                           }
 
                           // Check if channel already exists (case-insensitive)
-                          final normalizedInput = channelName.toLowerCase().trim();
                           final reservedNames = ['general', 'random'];
                           
                           if (reservedNames.contains(normalizedInput)) {
@@ -1593,7 +1765,7 @@ class _TeamHomePageState extends State<TeamHomePage> {
                           if (_channels.any((c) => c.toLowerCase().trim() == normalizedInput)) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
-                                content: Text('Channel "$channelName" already exists'),
+                                content: Text('Channel "$originalChannelName" already exists'),
                                 backgroundColor: Colors.orange,
                               ),
                             );
@@ -1605,8 +1777,8 @@ class _TeamHomePageState extends State<TeamHomePage> {
                           });
 
                           try {
-                            // Save channel to OrbitDB
-                            await _createChannel(channelName);
+                            // Save channel to database (pass original name to preserve case)
+                            await _createChannel(originalChannelName);
 
                             setDialogState(() {
                               isLoading = false;
@@ -1614,10 +1786,14 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
                             if (mounted) {
                               Navigator.of(context).pop();
+                              
+                              // Reload channels list to show the new channel
+                              await _loadChannels();
+                              
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
                                   content: Text(
-                                      'Channel "$channelName" created successfully'),
+                                      'Channel "$originalChannelName" created successfully'),
                                   backgroundColor: Colors.green,
                                 ),
                               );
@@ -1629,10 +1805,11 @@ class _TeamHomePageState extends State<TeamHomePage> {
                             if (mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
-                                  content: Text('Error creating channel: $e'),
+                                  content: Text('Error creating channel: ${e.toString()}'),
                                   backgroundColor: Colors.red,
+                                  duration: const Duration(seconds: 3),
                                 ),
-    );
+                              );
                             }
                           }
                         },
@@ -1708,25 +1885,74 @@ class _TeamHomePageState extends State<TeamHomePage> {
       // Normalize channel name (lowercase for database, but keep original for display)
       final normalizedChannelName = channelName.toLowerCase().trim();
       
-      // Check for duplicates before creating (case-insensitive)
-      final existingChannels = await DistributedService.getWorkspaceChannels(
-        workspaceId: _workspaceId!,
-      );
+      // Validate channel name
+      if (normalizedChannelName.isEmpty) {
+        throw Exception('Channel name cannot be empty');
+      }
       
-      if (existingChannels.any((c) => c.toLowerCase().trim() == normalizedChannelName)) {
-        throw Exception('Channel "$channelName" already exists in this workspace');
+      // Check for reserved names
+      final reservedNames = ['general', 'random'];
+      if (reservedNames.contains(normalizedChannelName)) {
+        throw Exception('General and Random are reserved channel names');
+      }
+      
+      // Check for duplicates before creating (case-insensitive)
+      // Use try-catch to handle server offline scenarios gracefully
+      try {
+        final existingChannels = await DistributedService.getWorkspaceChannels(
+          workspaceId: _workspaceId!,
+        ).timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            print('⚠️ Get channels request timed out, checking SQLite for duplicates');
+            return <String>[]; // Return empty list on timeout, will check SQLite below
+          },
+        );
+        
+        if (existingChannels.any((c) => c.toLowerCase().trim() == normalizedChannelName)) {
+          throw Exception('Channel "$channelName" already exists in this workspace');
+        }
+      } catch (e) {
+        // If server is offline or error occurs, check local SQLite
+        if (e.toString().contains('already exists')) {
+          rethrow; // Re-throw duplicate error
+        }
+        print('⚠️ Could not check server for duplicates, checking SQLite: $e');
+        final sqliteChannels = await HybridStorageService.instance.getWorkspaceChannels(
+          workspaceId: _workspaceId!,
+        );
+        
+        if (sqliteChannels.any((c) => c.toLowerCase().trim() == normalizedChannelName)) {
+          throw Exception('Channel "$channelName" already exists in this workspace');
+        }
       }
       
       // Save channel metadata to database
-      final channelCreated = await DistributedService.createChannel(
-        workspaceId: _workspaceId!,
-        channelId: normalizedChannelName,
-        creatorAddress: userAddress!,
-        channelName: channelName, // Keep original case for display
-      );
+      // Use try-catch to handle server offline scenarios gracefully
+      bool channelCreated = false;
+      try {
+        channelCreated = await DistributedService.createChannel(
+          workspaceId: _workspaceId!,
+          channelId: normalizedChannelName,
+          creatorAddress: userAddress!,
+          channelName: channelName, // Keep original case for display
+        ).timeout(
+          const Duration(seconds: 15),
+          onTimeout: () {
+            print('⚠️ Create channel request timed out, saving to SQLite only');
+            return false; // Will save to SQLite only
+          },
+        );
+      } catch (e) {
+        print('⚠️ Server channel creation failed, will save to SQLite only: $e');
+        // Continue to SQLite save even if server fails
+        channelCreated = false;
+      }
 
+      // If server creation failed, still save to SQLite for offline access
       if (!channelCreated) {
-        throw Exception('Failed to save channel to database. Channel may already exist.');
+        print('⚠️ Server channel creation failed or timed out, saving to SQLite only');
+        // Don't throw error - channel will be saved to SQLite for offline access
       }
 
       // CRITICAL: Save channel to SQLite immediately (for offline mode)

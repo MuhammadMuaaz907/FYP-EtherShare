@@ -360,10 +360,36 @@ class _ChannelPageState extends State<ChannelPage> {
         await _resolveWorkspaceId();
       }
       
+      // CRITICAL FIX: For polling, only fetch NEW messages (incremental loading)
+      // Calculate last message timestamp to only fetch messages after that
+      int? sinceTimestamp;
+      if (_messages.isNotEmpty) {
+        // Get timestamp of last message
+        final lastMessage = _messages.last;
+        final lastTimestamp = lastMessage['timestamp'];
+        
+        if (lastTimestamp is DateTime) {
+          sinceTimestamp = lastTimestamp.millisecondsSinceEpoch;
+        } else if (lastTimestamp is int) {
+          sinceTimestamp = lastTimestamp;
+        } else if (lastTimestamp is String) {
+          final parsed = DateTime.tryParse(lastTimestamp);
+          if (parsed != null) {
+            sinceTimestamp = parsed.millisecondsSinceEpoch;
+          }
+        }
+        
+        if (sinceTimestamp != null) {
+          print('🔄 Polling: Only fetching messages after ${DateTime.fromMillisecondsSinceEpoch(sinceTimestamp)}');
+        }
+      }
+      
       // Use HybridStorageService (works offline)
+      // Pass sinceTimestamp to only fetch new messages (prevents loading ALL messages every time)
       final loaded = await HybridStorageService.instance.getChannelMessages(
         workspaceId: _effectiveWorkspaceId,
         channelId: widget.channelName,
+        sinceTimestamp: sinceTimestamp, // Only fetch new messages during polling
       );
 
       for (var msg in loaded) {
@@ -387,58 +413,106 @@ class _ChannelPageState extends State<ChannelPage> {
           .whereType<String>()
           .toList();
       
+      // CRITICAL FIX: Get current user address to filter out user's own messages
+      if (userAddress == null) await _loadUserAddress();
+      final currentUserAddress = userAddress?.toLowerCase() ?? '';
+      
       // Find new messages (not already in _messages) and update temporary IDs
       final newMessages = <Map<String, dynamic>>[];
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final recentThreshold = 30000; // 30 seconds - exclude user's own recent messages
+      
       for (final msg in loaded) {
         final msgId = _getMessageId(msg);
-        if (msgId != null && !existingMessageIds.contains(msgId)) {
-          // Check if this message matches a temporary message (same content, sender, timestamp)
-          // This handles the case where we added a message locally with temp ID, and now we got the real one
-          final msgContent = (msg['content']?.toString() ?? 
-                           msg['message_text']?.toString() ?? 
-                           msg['messageText']?.toString() ?? '').trim();
-          final msgSender = msg['sender_address']?.toString() ?? 
-                          msg['senderAddress']?.toString() ?? 
-                          msg['userAddress']?.toString() ?? '';
-          final msgTimestamp = msg['timestamp'] is DateTime 
-              ? (msg['timestamp'] as DateTime).millisecondsSinceEpoch 
-              : (msg['timestamp'] is int ? msg['timestamp'] as int : 0);
-          
-          // Try to find and replace temporary message with same content/sender/timestamp
-          bool replacedTemp = false;
-          if (tempMessageIds.isNotEmpty && msgContent.isNotEmpty && msgSender.isNotEmpty) {
-            for (int i = 0; i < _messages.length; i++) {
-              final existingMsg = _messages[i];
-              final existingId = _getMessageId(existingMsg);
-              if (existingId != null && existingId.toString().startsWith('temp_')) {
-                final existingContent = (existingMsg['content']?.toString() ?? 
-                                       existingMsg['message_text']?.toString() ?? 
-                                       existingMsg['messageText']?.toString() ?? '').trim();
-                final existingSender = existingMsg['userAddress']?.toString() ?? 
+        if (msgId == null) continue;
+        
+        // CRITICAL FIX: Skip if message ID already exists in UI
+        if (existingMessageIds.contains(msgId)) {
+          continue;
+        }
+        
+        // Get message details for deduplication
+        final msgContent = (msg['content']?.toString() ?? 
+                         msg['message_text']?.toString() ?? 
+                         msg['messageText']?.toString() ?? '').trim();
+        final msgSender = (msg['sender_address']?.toString() ?? 
+                        msg['senderAddress']?.toString() ?? 
+                        msg['userAddress']?.toString() ?? '').toLowerCase();
+        final msgTimestamp = msg['timestamp'] is DateTime 
+            ? (msg['timestamp'] as DateTime).millisecondsSinceEpoch 
+            : (msg['timestamp'] is int ? msg['timestamp'] as int : 0);
+        
+        // CRITICAL FIX: Exclude user's own messages that were sent very recently (within last 30 seconds)
+        // This prevents user's own messages from appearing again via polling
+        if (currentUserAddress.isNotEmpty && 
+            msgSender == currentUserAddress && 
+            msgTimestamp > 0 && 
+            (now - msgTimestamp) < recentThreshold) {
+          print('🚫 Skipping user\'s own recent message (sent ${(now - msgTimestamp) / 1000}s ago): $msgId');
+          continue;
+        }
+        
+        // Check if this message matches a temporary message (same content, sender, timestamp)
+        // This handles the case where we added a message locally with temp ID, and now we got the real one
+        bool replacedTemp = false;
+        if (tempMessageIds.isNotEmpty && msgContent.isNotEmpty && msgSender.isNotEmpty) {
+          for (int i = 0; i < _messages.length; i++) {
+            final existingMsg = _messages[i];
+            final existingId = _getMessageId(existingMsg);
+            if (existingId != null && existingId.toString().startsWith('temp_')) {
+              final existingContent = (existingMsg['content']?.toString() ?? 
+                                     existingMsg['message_text']?.toString() ?? 
+                                     existingMsg['messageText']?.toString() ?? '').trim();
+              final existingSender = (existingMsg['userAddress']?.toString() ?? 
                                      existingMsg['sender_address']?.toString() ?? 
-                                     existingMsg['senderAddress']?.toString() ?? '';
-                final existingTimestamp = existingMsg['timestamp'] is DateTime 
-                    ? (existingMsg['timestamp'] as DateTime).millisecondsSinceEpoch 
-                    : (existingMsg['timestamp'] is int ? existingMsg['timestamp'] as int : 0);
-                
-                // Match if content, sender, and timestamp are close (within 5 seconds)
-                if (existingContent == msgContent && 
-                    existingSender.toLowerCase() == msgSender.toLowerCase() &&
-                    (existingTimestamp - msgTimestamp).abs() < 5000) {
-                  // Replace temporary message with real one
-                  _messages[i] = msg;
-                  replacedTemp = true;
-                  print('🔄 Replaced temporary message (${existingId.substring(0, 20)}...) with real message_id: $msgId');
-                  break;
-                }
+                                     existingMsg['senderAddress']?.toString() ?? '').toLowerCase();
+              final existingTimestamp = existingMsg['timestamp'] is DateTime 
+                  ? (existingMsg['timestamp'] as DateTime).millisecondsSinceEpoch 
+                  : (existingMsg['timestamp'] is int ? existingMsg['timestamp'] as int : 0);
+              
+              // Match if content, sender, and timestamp are close (within 5 seconds)
+              if (existingContent == msgContent && 
+                  existingSender == msgSender &&
+                  (existingTimestamp - msgTimestamp).abs() < 5000) {
+                // Replace temporary message with real one
+                _messages[i] = msg;
+                replacedTemp = true;
+                print('🔄 Replaced temporary message (${existingId.substring(0, 20)}...) with real message_id: $msgId');
+                break;
               }
             }
           }
-          
-          if (!replacedTemp) {
-            newMessages.add(msg);
-            existingMessageIds.add(msgId);
+        }
+        
+        // CRITICAL FIX: Also check if message already exists by content + sender + timestamp (not just message_id)
+        // This catches duplicates even if message IDs don't match
+        bool isDuplicate = false;
+        if (!replacedTemp && msgContent.isNotEmpty && msgSender.isNotEmpty) {
+          for (final existingMsg in _messages) {
+            final existingContent = (existingMsg['content']?.toString() ?? 
+                                   existingMsg['message_text']?.toString() ?? 
+                                   existingMsg['messageText']?.toString() ?? '').trim();
+            final existingSender = (existingMsg['userAddress']?.toString() ?? 
+                                   existingMsg['sender_address']?.toString() ?? 
+                                   existingMsg['senderAddress']?.toString() ?? '').toLowerCase();
+            final existingTimestamp = existingMsg['timestamp'] is DateTime 
+                ? (existingMsg['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (existingMsg['timestamp'] is int ? existingMsg['timestamp'] as int : 0);
+            
+            // Match if content, sender, and timestamp are close (within 5 seconds)
+            if (existingContent == msgContent && 
+                existingSender == msgSender &&
+                (existingTimestamp - msgTimestamp).abs() < 5000) {
+              isDuplicate = true;
+              print('🚫 Skipping duplicate message (content + sender + timestamp match): $msgId');
+              break;
+            }
           }
+        }
+        
+        if (!replacedTemp && !isDuplicate) {
+          newMessages.add(msg);
+          existingMessageIds.add(msgId);
         }
       }
       
