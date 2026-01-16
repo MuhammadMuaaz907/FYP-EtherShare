@@ -74,6 +74,9 @@ class _ChannelPageState extends State<ChannelPage> {
   bool _isCheckingMessages = false;
   DateTime? _lastMessageCheckTime;
   
+  // Auto-scroll controller for messages list
+  final ScrollController _scrollController = ScrollController();
+  
   // Workspace ID (resolved from workspace name)
   String? _workspaceId;
   
@@ -100,6 +103,14 @@ class _ChannelPageState extends State<ChannelPage> {
     
     // Set up real-time message updates
     _setupRealTimeUpdates();
+    
+    // WhatsApp/Instagram style: Scroll to bottom (newest messages) after first frame
+    // This ensures channel opens showing latest messages
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _messages.isNotEmpty) {
+        _scrollToBottom(smooth: false); // Instant scroll to show newest messages
+      }
+    });
   }
   
   /// Set up real-time message updates (polling + P2P callbacks)
@@ -262,6 +273,9 @@ class _ChannelPageState extends State<ChannelPage> {
     // Setting to null breaks P2P message reception when channel page is closed
     // P2PService.instance.onMessageReceived = null; // REMOVED - causes callback loss
     
+    // Dispose scroll controller
+    _scrollController.dispose();
+    
     _messageController.removeListener(_textListener);
     _messageController.dispose();
     _fileCache.clear();
@@ -276,6 +290,24 @@ class _ChannelPageState extends State<ChannelPage> {
     // Reset flag so messages reload when page is reopened
     _messagesLoaded = false;
     super.dispose();
+  }
+  
+  /// Auto-scroll to bottom when new message arrives
+  /// WhatsApp/Instagram style: Scroll to maxScrollExtent (bottom) to show newest messages
+  void _scrollToBottom({bool smooth = true}) {
+    if (_scrollController.hasClients && _messages.isNotEmpty) {
+      // When reverse: false, maxScrollExtent = bottom (newest messages)
+      // Position 0 = top (oldest messages)
+      if (smooth) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent, // Scroll to bottom (newest messages)
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      } else {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent); // Instant scroll to bottom (newest messages)
+      }
+    }
   }
 
   Future<Uint8List?> _getCachedFile(String cid) async {
@@ -558,6 +590,13 @@ class _ChannelPageState extends State<ChannelPage> {
                 : (b['timestamp'] is int ? b['timestamp'] as int : 0);
             return aTime.compareTo(bTime);
           });
+          
+          // Auto-scroll to bottom when new messages arrive
+          if (newMessages.isNotEmpty) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _scrollToBottom(smooth: true);
+            });
+          }
           
           // CRITICAL: ALWAYS perform final deduplication pass (even if no new messages)
           // This removes any duplicates that might have been added previously
@@ -968,6 +1007,14 @@ class _ChannelPageState extends State<ChannelPage> {
             return aTime.compareTo(bTime);
           });
           
+          // WhatsApp/Instagram style: Auto-scroll to bottom (newest messages) after loading
+          // This ensures channel opens showing latest messages, not oldest
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _messages.isNotEmpty) {
+              _scrollToBottom(smooth: false); // Instant scroll to show newest messages on channel open
+            }
+          });
+          
           // Final deduplication pass (safety check) - use consistent ID function
           final finalMessageIds = <String>{}; 
           final deduplicatedMessages = <Map<String, dynamic>>[];
@@ -1219,6 +1266,10 @@ class _ChannelPageState extends State<ChannelPage> {
             status = fileId != null 
                 ? 'Image sent successfully!' 
                 : 'Image saved locally (upload failed)';
+            // Auto-scroll to bottom when image message is added
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _scrollToBottom(smooth: true);
+            });
           });
         }
 
@@ -1410,6 +1461,10 @@ class _ChannelPageState extends State<ChannelPage> {
             status = fileId != null
                 ? (isVideo ? 'Video sent successfully!' : 'Image sent successfully!')
                 : 'Media saved locally (upload failed)';
+            // Auto-scroll to bottom when media message is added
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _scrollToBottom(smooth: true);
+            });
           });
         }
 
@@ -1636,6 +1691,10 @@ class _ChannelPageState extends State<ChannelPage> {
     // Add to UI immediately with temporary ID
     setState(() {
       _messages.add(msg);
+      // Auto-scroll to bottom when user sends message
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollToBottom(smooth: true);
+      });
     });
 
     // Use HybridStorageService (works offline + P2P)
@@ -1969,6 +2028,10 @@ class _ChannelPageState extends State<ChannelPage> {
               : 'Voice message saved locally (upload failed)';
           _recordingPath = null;
           _recordingDuration = Duration.zero;
+          // Auto-scroll to bottom when voice message is added
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _scrollToBottom(smooth: true);
+          });
           _isUploading = false;
         });
       }
@@ -2179,6 +2242,7 @@ class _ChannelPageState extends State<ChannelPage> {
       },
       child: Scaffold(
         backgroundColor: Colors.white,
+        resizeToAvoidBottomInset: true, // Auto-adjust when keyboard opens
       appBar: PreferredSize(
           preferredSize: const Size.fromHeight(70),
         child: Container(
@@ -2386,6 +2450,8 @@ class _ChannelPageState extends State<ChannelPage> {
                     ),
                   )
                 : ListView.builder(
+                            controller: _scrollController, // Auto-scroll controller
+                            reverse: false, // Messages: oldest at top, newest at bottom (WhatsApp/Instagram style)
                             padding: const EdgeInsetsDirectional.fromSTEB(
                                 20, 0, 20, 0),
                     itemCount: _messages.length,
