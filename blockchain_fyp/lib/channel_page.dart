@@ -384,15 +384,33 @@ class _ChannelPageState extends State<ChannelPage> {
         }
       }
       
+      // PHASE 4: Real-time message updates ONLY
       // Use HybridStorageService (works offline)
       // Pass sinceTimestamp to only fetch new messages (prevents loading ALL messages every time)
+      // CRITICAL: Only fetch real-time messages (not SYNCED - those are already displayed)
       final loaded = await HybridStorageService.instance.getChannelMessages(
         workspaceId: _effectiveWorkspaceId,
         channelId: widget.channelName,
         sinceTimestamp: sinceTimestamp, // Only fetch new messages during polling
       );
+      
+      // PHASE 4 RULE: Filter out SYNCED messages - they should NOT appear in real-time updates
+      // SYNCED messages are already in UI from initial load, don't re-add them
+      // PHASE 4: Messages appear ONLY when user sends or receives in real-time
+      // Server sync must NEVER auto-append messages (SYNCED filtered out)
+      final realTimeMessages = loaded.where((msg) {
+        final state = msg['message_state']?.toString();
+        // Only show real-time messages: ONLINE_CONFIRMED, OFFLINE_LOCAL, PENDING_SYNC
+        // Exclude SYNCED (those are from sync, not real-time - PHASE 4 requirement)
+        return state != 'SYNCED';
+      }).toList();
+      
+      if (realTimeMessages.length < loaded.length) {
+        print('🚫 PHASE 4: Filtered out ${loaded.length - realTimeMessages.length} SYNCED messages (not real-time)');
+      }
 
-      for (var msg in loaded) {
+      // PHASE 4: Process only real-time messages (SYNCED filtered out above)
+      for (var msg in realTimeMessages) {
         if (msg['timestamp'] is String) {
           msg['timestamp'] = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
         } else if (msg['timestamp'] is int) {
@@ -417,12 +435,14 @@ class _ChannelPageState extends State<ChannelPage> {
       if (userAddress == null) await _loadUserAddress();
       final currentUserAddress = userAddress?.toLowerCase() ?? '';
       
-      // Find new messages (not already in _messages) and update temporary IDs
+      // PHASE 4: Find new REAL-TIME messages (not already in _messages)
+      // Only messages that are real-time (user sends or receives) should appear
       final newMessages = <Map<String, dynamic>>[];
       final now = DateTime.now().millisecondsSinceEpoch;
       final recentThreshold = 30000; // 30 seconds - exclude user's own recent messages
       
-      for (final msg in loaded) {
+      // PHASE 4: Process only real-time messages (SYNCED already filtered out)
+      for (final msg in realTimeMessages) {
         final msgId = _getMessageId(msg);
         if (msgId == null) continue;
         
@@ -519,7 +539,8 @@ class _ChannelPageState extends State<ChannelPage> {
       // CRITICAL: Always perform final deduplication, even if no new messages
       // This ensures any duplicates that somehow got into _messages are removed
       if (mounted) {
-        print('📥 Real-time update: Found ${newMessages.length} new messages (${loaded.length} total, ${_messages.length} existing)');
+        print('📥 PHASE 4: Real-time update: Found ${newMessages.length} new REAL-TIME messages (${realTimeMessages.length} real-time, ${_messages.length} existing)');
+        print('   ✅ SYNCED messages filtered out (not real-time)');
         
         setState(() {
           // Add new messages if any
@@ -3178,9 +3199,47 @@ class _ChannelPageState extends State<ChannelPage> {
     );
   }
 
+  /// PHASE 4: Get message state indicator widget
+  /// Returns visual indicator for message state: ⏳ Pending (offline), ✅ Confirmed (online)
+  Widget _getMessageStateIndicator(String? messageState, bool isSent) {
+    // Only show indicators for sent messages (user's own messages)
+    if (!isSent) {
+      return const SizedBox.shrink();
+    }
+    
+    if (messageState == null || messageState.isEmpty) {
+      // Default: show confirmed icon for sent messages (fallback)
+      return const Icon(Icons.check_circle, color: Colors.green, size: 16);
+    }
+    
+    switch (messageState) {
+      case 'ONLINE_CONFIRMED':
+      case 'SYNCED':
+        // ✅ Confirmed (online) - message is on server
+        return const Icon(
+          Icons.check_circle,
+          color: Colors.green,
+          size: 16,
+        );
+      case 'OFFLINE_LOCAL':
+      case 'PENDING_SYNC':
+        // ⏳ Pending (offline) - message not yet synced
+        return const Icon(
+          Icons.access_time,
+          color: Colors.orange,
+          size: 16,
+        );
+      default:
+        // Default: show confirmed icon (fallback)
+        return const Icon(Icons.check_circle, color: Colors.green, size: 16);
+    }
+  }
+
   Widget _buildMessageTile(Map<String, dynamic> message,
       {required bool isSent}) {
     final timestamp = _formatTimestamp(message['timestamp']);
+    // PHASE 4: Get message state for visual indicator
+    final messageState = message['message_state']?.toString();
 
     // Priority: If type is explicitly set, use it. Otherwise, infer from extension or content.
     // If type is 'file', always treat as file regardless of extension
@@ -3343,11 +3402,8 @@ class _ChannelPageState extends State<ChannelPage> {
                                 ),
                               ),
                               const SizedBox(width: 4),
-                              const Icon(
-                                Icons.done_all_sharp,
-                                color: Color(0xFF0F365F),
-                                size: 16,
-                              ),
+                              // PHASE 4: Show state indicator (⏳ Pending or ✅ Confirmed)
+                              _getMessageStateIndicator(messageState, isSent),
                             ],
                           ),
                         ),
@@ -3425,11 +3481,8 @@ class _ChannelPageState extends State<ChannelPage> {
                                 ),
           ),
                               const SizedBox(width: 4),
-                              const Icon(
-                                Icons.done_all_sharp,
-                                color: Colors.white,
-                                size: 16,
-                              ),
+                              // PHASE 4: Show state indicator (⏳ Pending or ✅ Confirmed)
+                              _getMessageStateIndicator(messageState, isSent),
                             ],
                           ),
                         ),
@@ -3522,11 +3575,8 @@ class _ChannelPageState extends State<ChannelPage> {
                     ),
                 ),
                                 const SizedBox(width: 6),
-                                const Icon(
-                                  Icons.done_all,
-                                  color: Color(0xFF0F365F),
-                                  size: 16,
-                    ),
+                                // PHASE 4: Show state indicator (⏳ Pending or ✅ Confirmed)
+                                _getMessageStateIndicator(messageState, isSent),
                   ],
                 ),
                           ],
@@ -3640,11 +3690,8 @@ class _ChannelPageState extends State<ChannelPage> {
                                 ),
                             ),
                             const SizedBox(width: 6),
-                            const Icon(
-                              Icons.done_all,
-                              color: Color(0xFF0F365F),
-                              size: 16,
-                              ),
+                            // PHASE 4: Show state indicator (⏳ Pending or ✅ Confirmed)
+                            _getMessageStateIndicator(messageState, isSent),
                             ],
                           ),
                       ],

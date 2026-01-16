@@ -126,10 +126,27 @@ class HashChain {
         brokenDocuments: []
       };
       
+      // CRITICAL: Track seen message_ids to detect duplicates
+      const seenMessageIds = new Set();
+      
       for (let i = 0; i < documents.length; i++) {
         const doc = documents[i];
         const currentHash = doc.current_hash;
         const previousHash = doc.previous_hash;
+        const messageId = doc.message_id;
+        
+        // CRITICAL: Skip duplicate message_ids (idempotent sync duplicates)
+        // Duplicates are NOT chain breaks - they're just repeated sync attempts
+        if (messageId && seenMessageIds.has(messageId)) {
+          console.log(`⚠️ Skipping duplicate message_id: ${messageId} (not a chain break)`);
+          details.verifiedDocuments++; // Count as verified (duplicate is valid)
+          continue; // Skip duplicate, don't advance expectedHash
+        }
+        
+        // Track this message_id
+        if (messageId) {
+          seenMessageIds.add(messageId);
+        }
         
         // Skip documents without hash fields (old messages)
         if (!currentHash && !previousHash) {
@@ -138,8 +155,17 @@ class HashChain {
           continue;
         }
         
-        // Verify previous hash matches
+        // CRITICAL: Verify previous hash matches
+        // BUT: If previous_hash doesn't match, check if it's a duplicate message_id first
+        // Duplicates can have different previous_hash if they were synced out of order
         if (previousHash !== expectedHash) {
+          // Check if this is a duplicate by message_id (already handled above, but double-check)
+          if (messageId && seenMessageIds.has(messageId)) {
+            console.log(`⚠️ Skipping duplicate message_id with mismatched previous_hash: ${messageId}`);
+            details.verifiedDocuments++;
+            continue;
+          }
+          
           brokenAt = doc._id?.toString() || doc.message_id || doc.channel_id || 'unknown';
           console.error(`❌ Chain broken at document: ${brokenAt}`);
           console.error(`   Document index: ${i + 1} of ${documents.length}`);

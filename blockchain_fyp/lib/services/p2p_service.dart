@@ -312,15 +312,16 @@ class P2PService {
       final channelName = message['channel_name'] as String? ?? channelId;
       final creatorAddress = message['creator_address'] as String? ?? senderAddress;
       
-      // Save channel to SQLite
+      // Save channel to SQLite (mark as not synced to server since it came via P2P)
       SQLiteService.instance.saveChannel(
         workspaceId: workspaceId,
         channelId: channelId,
         channelName: channelName,
         creatorAddress: creatorAddress,
+        syncedToServer: false, // Mark as unsynced - will sync when server comes online
       ).then((saved) {
         if (saved) {
-          print('✅ Channel "$channelName" saved to SQLite from P2P broadcast');
+          print('✅ Channel "$channelName" saved to SQLite from P2P broadcast (will sync to server when online)');
           
           // Send acknowledgment
           _sendToPeer(peerId, {
@@ -331,12 +332,15 @@ class P2PService {
           });
           
           // Notify callback (for UI updates - reload channels)
+          // This triggers UI reload on receiver devices
           onChannelCreated?.call({
             'workspace_id': workspaceId,
             'channel_id': channelId,
             'channel_name': channelName,
             'creator_address': creatorAddress,
           });
+          
+          print('📢 Channel creation callback triggered for UI update');
         } else {
           print('⚠️ Failed to save channel to SQLite');
         }
@@ -372,6 +376,12 @@ class P2PService {
           return;
         }
         
+        // CRITICAL FIX: Determine message state based on server status
+        // P2P messages should be OFFLINE_LOCAL if server is offline
+        // If server is online, message might already be on server (via another path)
+        // We'll mark as OFFLINE_LOCAL and let sync handle it (sync will check idempotency)
+        final messageState = 'OFFLINE_LOCAL'; // Always start as offline, sync will update if needed
+        
         // Save channel message to SQLite
         final saved = await SQLiteService.instance.addMessage(
           workspaceId: workspaceId,
@@ -380,6 +390,7 @@ class P2PService {
           receiverAddress: null, // Channel message, no specific receiver
           messageText: content,
           providedMessageId: messageId, // Use same message ID from P2P
+          messageState: messageState, // CRITICAL: Set proper state
         );
 
         if (saved != null) {
@@ -421,12 +432,17 @@ class P2PService {
         return;
       }
 
+      // CRITICAL FIX: Set proper state for P2P direct messages
+      final messageState = 'OFFLINE_LOCAL'; // Always start as offline, sync will update if needed
+      
       // Save message to SQLite
       SQLiteService.instance.addMessage(
         workspaceId: workspaceId ?? '',
         senderAddress: senderAddress,
         receiverAddress: receiverAddress,
         messageText: content,
+        providedMessageId: messageId, // Use same message ID from P2P
+        messageState: messageState, // CRITICAL: Set proper state
       );
 
       // Send acknowledgment

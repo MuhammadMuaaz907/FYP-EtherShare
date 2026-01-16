@@ -909,6 +909,7 @@ class DistributedService {
 
   /// Add message (compatible with MongoDBService)
   /// Uses both messages API (legacy) and distributed ledger system
+  /// CRITICAL: Supports idempotent sync with messageId, previousHash, currentHash
   static Future<String?> addMessage({
     required String workspaceId,
     String? channelId,
@@ -916,30 +917,48 @@ class DistributedService {
     String? receiverAddress,
     required String messageText,
     String? fileId,
+    String? messageId, // Optional: existing message_id for idempotent sync
+    String? previousHash, // Optional: previous_hash for idempotent sync
+    String? currentHash, // Optional: current_hash for idempotent sync
   }) async {
     try {
-      String? messageId;
+      String? returnedMessageId;
       
       // First, add to messages API (for backward compatibility and immediate access)
+      // CRITICAL: Include messageId, previousHash, currentHash for idempotent sync
       try {
         final messagesUrl = Uri.parse('$baseUrl/api/messages');
+        final requestBody = {
+          'workspaceId': workspaceId,
+          'channelId': channelId,
+          'senderAddress': senderAddress,
+          'receiverAddress': receiverAddress,
+          'messageText': messageText,
+          'fileId': fileId,
+        };
+        
+        // CRITICAL: Add idempotency fields if provided (for sync)
+        // Use parameter messageId (not local variable) to avoid shadowing bug
+        if (messageId != null && messageId.isNotEmpty) {
+          requestBody['messageId'] = messageId;
+        }
+        if (previousHash != null && previousHash.isNotEmpty) {
+          requestBody['previousHash'] = previousHash;
+        }
+        if (currentHash != null && currentHash.isNotEmpty) {
+          requestBody['currentHash'] = currentHash;
+        }
+        
         final messagesResponse = await http.post(
           messagesUrl,
           headers: headers,
-          body: jsonEncode({
-            'workspaceId': workspaceId,
-            'channelId': channelId,
-            'senderAddress': senderAddress,
-            'receiverAddress': receiverAddress,
-            'messageText': messageText,
-            'fileId': fileId,
-          }),
+          body: jsonEncode(requestBody),
         );
 
-        if (messagesResponse.statusCode == 201) {
+        if (messagesResponse.statusCode == 200 || messagesResponse.statusCode == 201) {
           final messagesData = jsonDecode(messagesResponse.body);
-          messageId = messagesData['data']['message_id'] as String?;
-          print('✅ Message added to messages API: $messageId');
+          returnedMessageId = messagesData['data']?['message_id'] as String? ?? messageId;
+          print('✅ Message added to messages API: $returnedMessageId');
         }
       } catch (e) {
         print('⚠️ Messages API error (continuing with ledger): $e');
@@ -962,7 +981,7 @@ class DistributedService {
             final blockId = block['block_id'] as String? ?? block['_id']?.toString();
             print('✅ Message added to ledger: $blockId');
             // Use block ID if message ID not available
-            messageId ??= blockId;
+            returnedMessageId ??= blockId;
           }
         } else {
           print('⚠️ No node available for ledger (message still saved to API)');
@@ -971,7 +990,9 @@ class DistributedService {
         print('⚠️ Ledger error (message still saved to API): $e');
       }
 
-      return messageId;
+      // CRITICAL: Return messageId from parameter if provided (for idempotent sync)
+      // Otherwise return server-generated ID
+      return returnedMessageId ?? messageId;
     } catch (e) {
       print('❌ Add message error: $e');
       return null;
@@ -1193,11 +1214,18 @@ class DistributedService {
         
         final messages = List<Map<String, dynamic>>.from(data['data'] ?? []);
         
+        // Get last hash from server response (for chain continuity)
+        final lastHash = data['lastHash'] as String?;
+        final lastMessageId = data['lastMessageId'] as String?;
+        
         // Debug logging
         print('📥 Received ${messages.length} messages from server for channel $channelId');
         if (messages.isNotEmpty) {
           print('📋 First message keys: ${messages.first.keys.toList()}');
           print('📋 Sample message: ${messages.first.toString().substring(0, messages.first.toString().length > 300 ? 300 : messages.first.toString().length)}...');
+        }
+        if (lastHash != null) {
+          print('🔗 Server last hash: ${lastHash.substring(0, 10)}...');
         }
         
         // Log chain validation status for debugging
@@ -1311,6 +1339,13 @@ class DistributedService {
             };
           }
         }).toList();
+        
+        // Add metadata for chain continuity (last hash from server)
+        if (lastHash != null && transformed.isNotEmpty) {
+          // Store last hash in first message metadata (for chain state saving)
+          transformed.first['_lastServerHash'] = lastHash;
+          transformed.first['_lastServerMessageId'] = lastMessageId;
+        }
         
         print('✅ Transformed ${transformed.length} messages for UI');
         return transformed;

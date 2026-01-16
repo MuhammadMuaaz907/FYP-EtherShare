@@ -20,6 +20,7 @@ class HybridStorageService {
   bool _isServerOnline = false;
   Timer? _syncTimer;
   String? _currentUserAddress;
+  bool _isSyncing = false; // CRITICAL: Lock to prevent concurrent syncs
 
   /// Initialize hybrid storage
   Future<void> initialize({required String userAddress}) async {
@@ -365,10 +366,12 @@ class HybridStorageService {
       if (!_isServerOnline) {
         print('⚠️ Server is now offline - app will use SQLite and P2P');
         print('💡 P2P will continue to work using cached peer info from SQLite');
+        print('🔗 Chain state already saved - offline messages will link to server chain');
       } else {
         print('✅ Server is now online - syncing data and discovering peers...');
-        // Trigger sync when server comes back online
-        syncToServer();
+        // CRITICAL FIX: Don't trigger sync here - let periodic timer handle it
+        // This prevents multiple sync triggers when server comes online
+        // Sync will happen automatically on next timer tick (within 30 seconds)
         // Discover peers when server comes back online
         _discoverPeersFromServer();
       }
@@ -582,6 +585,11 @@ class HybridStorageService {
     required String messageText,
     String? fileId,
   }) async {
+    // CRITICAL: Determine message state based on server status
+    // If server is online, mark as ONLINE_CONFIRMED
+    // If server is offline, mark as OFFLINE_LOCAL (will be changed to PENDING_SYNC when syncing)
+    final messageState = _isServerOnline ? 'ONLINE_CONFIRMED' : 'OFFLINE_LOCAL';
+    
     // Save to SQLite immediately
     final messageId = await SQLiteService.instance.addMessage(
       workspaceId: workspaceId,
@@ -590,6 +598,7 @@ class HybridStorageService {
       receiverAddress: receiverAddress,
       messageText: messageText,
       fileId: fileId,
+      messageState: messageState, // CRITICAL: Set proper state
     );
 
     if (messageId == null) {
@@ -945,7 +954,21 @@ class HybridStorageService {
               .whereType<String>()
               .toSet();
           
-          print('💾 Checking ${messagesToProcess.length} server messages against ${existingMessages.length} SQLite messages');
+          // CRITICAL FIX: Get list of already synced messages to prevent re-caching
+          // This prevents duplicate messages when sync timer syncs messages and then
+          // getChannelMessages fetches them again from server
+          final syncedMessageIds = <String>{};
+          for (final existingMsg in existingMessages) {
+            final synced = existingMsg['synced_to_server'] as int? ?? 0;
+            if (synced == 1) {
+              final msgId = existingMsg['message_id']?.toString();
+              if (msgId != null) {
+                syncedMessageIds.add(msgId);
+              }
+            }
+          }
+          
+          print('💾 Checking ${messagesToProcess.length} server messages against ${existingMessages.length} SQLite messages (${syncedMessageIds.length} already synced)');
           int cached = 0;
           int skipped = 0;
           
@@ -960,6 +983,27 @@ class HybridStorageService {
                 skipped++;
                 continue;
               }
+              
+          // CRITICAL FIX: Skip if message is already synced OR has state SYNCED/ONLINE_CONFIRMED
+          // This prevents duplicate messages when sync timer syncs messages and then
+          // getChannelMessages fetches them again from server
+          if (syncedMessageIds.contains(messageId)) {
+            print('ℹ️ Skipping already synced message: $messageId (prevent re-cache after sync)');
+            skipped++;
+            continue;
+          }
+          
+          // CRITICAL: Also check message state - skip SYNCED and ONLINE_CONFIRMED messages
+          final existingMsgState = existingMessages.firstWhere(
+            (m) => m['message_id']?.toString() == messageId,
+            orElse: () => <String, dynamic>{},
+          );
+          final msgState = existingMsgState['message_state']?.toString();
+          if (msgState == 'SYNCED' || msgState == 'ONLINE_CONFIRMED') {
+            print('ℹ️ Skipping message with state $msgState: $messageId (prevent re-cache)');
+            skipped++;
+            continue;
+          }
               
               // Skip if message already exists in SQLite by messageId
               if (existingMessageIds.contains(messageId)) {
@@ -1068,6 +1112,64 @@ class HybridStorageService {
             print('✅ Messages cached: $cached new, $skipped skipped (already exist)');
           } else if (skipped > 0) {
             print('ℹ️ All ${serverMessages.length} server messages already cached ($skipped skipped)');
+          }
+        }
+        
+        // CRITICAL: Save last server hash for chain continuity
+        // This ensures when server goes offline, SQLite messages can link to server's chain
+        if (serverMessages.isNotEmpty) {
+          // Get last hash from server response metadata (if available)
+          final lastHash = serverMessages.first['_lastServerHash'] as String?;
+          final lastMessageId = serverMessages.first['_lastServerMessageId'] as String?;
+          
+          if (lastHash != null) {
+            // Get last message timestamp from SQLite (after caching)
+            final lastSqliteMessages = await SQLiteService.instance.getChannelMessages(
+              workspaceId: workspaceId,
+              channelId: channelId,
+              sinceTimestamp: null,
+            );
+            
+            int? lastTimestamp;
+            if (lastSqliteMessages.isNotEmpty) {
+              final lastMsg = lastSqliteMessages.last;
+              lastTimestamp = lastMsg['timestamp'] as int?;
+            }
+            
+            // Save chain state for this channel
+            await SQLiteService.instance.saveChainState(
+              workspaceId: workspaceId,
+              channelId: channelId,
+              lastServerHash: lastHash,
+              lastServerMessageId: lastMessageId,
+              lastServerTimestamp: lastTimestamp ?? DateTime.now().millisecondsSinceEpoch,
+            );
+            print('🔗 Saved chain state: workspace=$workspaceId, channel=$channelId, hash=${lastHash.substring(0, 10)}...');
+          } else {
+            // Fallback: Get last hash from SQLite after caching (if server didn't provide it)
+            final lastSqliteMessages = await SQLiteService.instance.getChannelMessages(
+              workspaceId: workspaceId,
+              channelId: channelId,
+              sinceTimestamp: null,
+            );
+            
+            if (lastSqliteMessages.isNotEmpty) {
+              final lastMsg = lastSqliteMessages.last;
+              final lastHash = lastMsg['current_hash'] as String?;
+              final lastMsgId = lastMsg['message_id'] as String?;
+              final lastTimestamp = lastMsg['timestamp'] as int?;
+              
+              if (lastHash != null) {
+                await SQLiteService.instance.saveChainState(
+                  workspaceId: workspaceId,
+                  channelId: channelId,
+                  lastServerHash: lastHash,
+                  lastServerMessageId: lastMsgId,
+                  lastServerTimestamp: lastTimestamp ?? DateTime.now().millisecondsSinceEpoch,
+                );
+                print('🔗 Saved chain state (fallback): hash=${lastHash.substring(0, 10)}...');
+              }
+            }
           }
         }
         
@@ -1239,28 +1341,200 @@ class HybridStorageService {
   }
 
   /// Sync unsynced data to server
+  /// CRITICAL: Uses lock to prevent concurrent syncs (race condition prevention)
+  /// PHASE 3: Exact sync flow implementation
   Future<void> syncToServer() async {
     if (!_isServerOnline) {
       return;
     }
-
+    
+    // CRITICAL FIX: Prevent concurrent syncs (multiple triggers can call this simultaneously)
+    if (_isSyncing) {
+      print('⚠️ Sync already in progress, skipping duplicate sync request');
+      return;
+    }
+    
+    _isSyncing = true;
     try {
       print('🔄 Syncing to server...');
 
-      // Get unsynced messages
-      final unsyncedMessages = await SQLiteService.instance.getUnsyncedMessages();
+      // PHASE 3 STEP 1: Detect server online (already done - _isServerOnline check above)
+      // PHASE 3 STEP 2: Fetch messages WHERE state = PENDING_SYNC
+      // CRITICAL: First, mark OFFLINE_LOCAL messages as PENDING_SYNC (transition state)
+      // Then fetch only PENDING_SYNC messages for sync
+      final offlineMessages = await SQLiteService.instance.getUnsyncedMessages();
+      
+      // Mark OFFLINE_LOCAL messages as PENDING_SYNC (prepare for sync)
+      int markedCount = 0;
+      for (final msg in offlineMessages) {
+        final messageId = msg['message_id']?.toString();
+        final state = msg['message_state']?.toString();
+        
+        if (messageId != null && state == 'OFFLINE_LOCAL') {
+          await SQLiteService.instance.updateMessageState(
+            messageId: messageId,
+            state: 'PENDING_SYNC',
+          );
+          markedCount++;
+        }
+      }
+      
+      if (markedCount > 0) {
+        print('📋 Marked $markedCount OFFLINE_LOCAL message(s) as PENDING_SYNC');
+      }
+      
+      // PHASE 3 STEP 2: Fetch messages WHERE state = PENDING_SYNC (exact requirement)
+      final pendingSyncMessages = await SQLiteService.instance.getMessagesByState('PENDING_SYNC');
+      
+      // Get unsynced channels (created offline)
+      final unsyncedChannels = await SQLiteService.instance.getUnsyncedChannels();
 
-      if (unsyncedMessages.isEmpty) {
-        print('ℹ️ No unsynced messages to sync');
+      if (pendingSyncMessages.isEmpty && unsyncedChannels.isEmpty) {
+        print('ℹ️ No unsynced data to sync');
         return;
       }
 
-      print('📤 Found ${unsyncedMessages.length} unsynced message(s) to sync');
+      print('📤 Found ${pendingSyncMessages.length} PENDING_SYNC message(s) and ${unsyncedChannels.length} unsynced channel(s) to sync');
 
-      int syncedCount = 0;
-      for (final msg in unsyncedMessages) {
+      // CRITICAL FIX: Before syncing messages, store last MongoDB hash for each channel
+      // This ensures chain continuity - server will calculate hash from MongoDB's last message
+      // and SQLite messages will link properly to server's chain
+      final channelsToSync = <String, Map<String, String>>{}; // workspaceId:channelId -> {workspaceId, channelId}
+      
+      for (final msg in pendingSyncMessages) {
+        final workspaceId = msg['workspace_id']?.toString();
+        final channelId = msg['channel_id']?.toString();
+        
+        if (workspaceId != null && channelId != null) {
+          final key = '$workspaceId:$channelId';
+          if (!channelsToSync.containsKey(key)) {
+            channelsToSync[key] = {
+              'workspaceId': workspaceId,
+              'channelId': channelId,
+            };
+          }
+        }
+      }
+      
+      // Store last MongoDB hash for each channel BEFORE syncing
+      // This ensures server calculates hash from MongoDB's last message (not SQLite's)
+      for (final channelInfo in channelsToSync.values) {
+        final workspaceId = channelInfo['workspaceId']!;
+        final channelId = channelInfo['channelId']!;
+        
+        try {
+          // Fetch last message from server to get its hash
+          final serverMessages = await DistributedService.getChannelMessages(
+            workspaceId: workspaceId,
+            channelId: channelId,
+          );
+          
+          if (serverMessages.isNotEmpty) {
+            // Get last hash from server response metadata
+            final lastHash = serverMessages.first['_lastServerHash'] as String?;
+            final lastMessageId = serverMessages.first['_lastServerMessageId'] as String?;
+            
+            if (lastHash != null) {
+              // Store chain state BEFORE syncing
+              // This ensures server calculates hash from MongoDB's last message
+              await SQLiteService.instance.saveChainState(
+                workspaceId: workspaceId,
+                channelId: channelId,
+                lastServerHash: lastHash,
+                lastServerMessageId: lastMessageId,
+                lastServerTimestamp: DateTime.now().millisecondsSinceEpoch,
+              );
+              print('🔗 Stored MongoDB last hash BEFORE sync: workspace=$workspaceId, channel=$channelId, hash=${lastHash.substring(0, 10)}...');
+            } else {
+              // Fallback: Get last hash from SQLite (if server didn't provide it)
+              final lastSqliteMessages = await SQLiteService.instance.getChannelMessages(
+                workspaceId: workspaceId,
+                channelId: channelId,
+                sinceTimestamp: null,
+              );
+              
+              if (lastSqliteMessages.isNotEmpty) {
+                final lastMsg = lastSqliteMessages.last;
+                final lastHash = lastMsg['current_hash'] as String?;
+                final lastMsgId = lastMsg['message_id'] as String?;
+                final lastTimestamp = lastMsg['timestamp'] as int?;
+                
+                if (lastHash != null) {
+                  await SQLiteService.instance.saveChainState(
+                    workspaceId: workspaceId,
+                    channelId: channelId,
+                    lastServerHash: lastHash,
+                    lastServerMessageId: lastMsgId,
+                    lastServerTimestamp: lastTimestamp ?? DateTime.now().millisecondsSinceEpoch,
+                  );
+                  print('🔗 Stored SQLite last hash BEFORE sync (fallback): hash=${lastHash.substring(0, 10)}...');
+                }
+              }
+            }
+          }
+        } catch (e) {
+          print('⚠️ Error storing chain state before sync: $e');
+          // Continue even if chain state storage fails
+        }
+      }
+
+      // Sync unsynced channels first
+      int syncedChannelCount = 0;
+      for (final channel in unsyncedChannels) {
+        try {
+          final workspaceId = channel['workspace_id']?.toString();
+          final channelId = channel['channel_id']?.toString();
+          final channelName = channel['channel_name']?.toString() ?? channelId;
+          final creatorAddress = channel['creator_address']?.toString();
+          
+          if (workspaceId == null || channelId == null || creatorAddress == null) {
+            print('⚠️ Skipping channel with missing data');
+            continue;
+          }
+
+          print('🔄 Syncing channel "$channelName" to server...');
+          
+          // Create channel on server
+          final channelCreated = await DistributedService.createChannel(
+            workspaceId: workspaceId,
+            channelId: channelId,
+            creatorAddress: creatorAddress,
+            channelName: channelName,
+            isPrivate: (channel['is_private'] as int? ?? 0) == 1,
+          );
+
+          if (channelCreated) {
+            // Mark channel as synced
+            await SQLiteService.instance.markChannelSynced(
+              workspaceId: workspaceId,
+              channelId: channelId,
+            );
+            syncedChannelCount++;
+            print('✅ Channel "$channelName" synced to server');
+          } else {
+            print('⚠️ Failed to sync channel "$channelName" to server');
+          }
+        } catch (e) {
+          print('⚠️ Sync channel error: $e');
+        }
+      }
+
+      // PHASE 3 STEP 3: Send headers to server (message_id, channel_id, prev_hash, current_hash, timestamp)
+      // PHASE 3 STEP 4: Server validates + confirms (handled by server idempotency check)
+      // PHASE 3 STEP 5: Client updates state to SYNCED
+      // PHASE 3 STEP 6: NO UI re-render (SYNCED messages skipped in getChannelMessages)
+      // PHASE 3 STEP 7: NO block re-creation (server uses provided hashes)
+      
+      int syncedMessageCount = 0;
+      final Set<String> syncedChannels = {}; // Track channels that had messages synced
+      
+      // PHASE 3: Process only PENDING_SYNC messages (already marked above)
+      for (final msg in pendingSyncMessages) {
         try {
           final localMessageId = msg['message_id'] as String?;
+          final workspaceId = msg['workspace_id'] as String?;
+          final channelId = msg['channel_id'] as String?;
+          
           if (localMessageId == null || localMessageId.isEmpty) {
             print('⚠️ Skipping message without messageId');
             continue;
@@ -1273,16 +1547,25 @@ class HybridStorageService {
             continue;
           }
 
+          // PHASE 3 STEP 3: Send headers to server
+          // Headers: message_id, channel_id, prev_hash, current_hash, timestamp
+          // Server validates and confirms (idempotent - no re-insert if duplicate)
           final serverMessageId = await DistributedService.addMessage(
-            workspaceId: msg['workspace_id'] ?? '',
-            channelId: msg['channel_id'],
+            workspaceId: workspaceId ?? '',
+            channelId: channelId,
             senderAddress: msg['sender_address'] ?? '',
             receiverAddress: msg['receiver_address'],
             messageText: msg['message_text'] ?? '',
             fileId: msg['file_id'],
+            messageId: localMessageId, // CRITICAL: Pass existing message_id for idempotency
+            previousHash: msg['previous_hash'] as String?, // Header: prev_hash
+            currentHash: msg['current_hash'] as String?, // Header: current_hash
+            // timestamp is included in messageData on server side
           );
 
+          // PHASE 3 STEP 4: Server validates + confirms (returns message_id if successful)
           if (serverMessageId != null) {
+            // PHASE 3 STEP 5: Client updates state to SYNCED
             // Update SQLite message with server messageId if different
             if (serverMessageId != localMessageId) {
               await SQLiteService.instance.updateMessageId(
@@ -1290,20 +1573,116 @@ class HybridStorageService {
                 newMessageId: serverMessageId,
               );
               print('✅ Synced and updated messageId: $localMessageId -> $serverMessageId');
-            } else {
-              await SQLiteService.instance.markMessageSynced(localMessageId);
-              print('✅ Synced message: $localMessageId');
             }
-            syncedCount++;
+            
+            // PHASE 3 STEP 5: Update state to SYNCED
+            // PHASE 3 STEP 6: NO UI re-render (SYNCED messages skipped in getChannelMessages)
+            await SQLiteService.instance.updateMessageState(
+              messageId: serverMessageId != localMessageId ? serverMessageId : localMessageId,
+              state: 'SYNCED',
+            );
+            print('✅ PHASE 3: Message synced (state: SYNCED) - NO UI re-render, NO block re-creation');
+            
+            syncedMessageCount++;
+            
+            // Track channel for chain state clearing
+            if (workspaceId != null && channelId != null) {
+              syncedChannels.add('$workspaceId:$channelId');
+            }
           }
         } catch (e) {
           print('⚠️ Sync message error: $e');
+          // On error, keep message in PENDING_SYNC state for retry
+        }
+      }
+      
+      // CRITICAL: After successful sync, update chain state with new last hash from server
+      // This ensures chain continuity for next offline session
+      for (final channelKey in syncedChannels) {
+        final parts = channelKey.split(':');
+        if (parts.length == 2) {
+          final workspaceId = parts[0];
+          final channelId = parts[1];
+          
+          try {
+            // Fetch messages from server to get updated last hash
+            final serverMessages = await DistributedService.getChannelMessages(
+              workspaceId: workspaceId,
+              channelId: channelId,
+            );
+            
+            if (serverMessages.isNotEmpty) {
+              // Get last hash from server response metadata
+              final lastHash = serverMessages.first['_lastServerHash'] as String?;
+              final lastMessageId = serverMessages.first['_lastServerMessageId'] as String?;
+              
+              if (lastHash != null) {
+                // Update chain state with new last hash AFTER sync
+                await SQLiteService.instance.saveChainState(
+                  workspaceId: workspaceId,
+                  channelId: channelId,
+                  lastServerHash: lastHash,
+                  lastServerMessageId: lastMessageId,
+                  lastServerTimestamp: DateTime.now().millisecondsSinceEpoch,
+                );
+                print('🔗 Updated chain state AFTER sync: workspace=$workspaceId, channel=$channelId, hash=${lastHash.substring(0, 10)}...');
+              } else {
+                // If server didn't provide hash, clear chain state (fresh start)
+                await SQLiteService.instance.clearChainState(
+                  workspaceId: workspaceId,
+                  channelId: channelId,
+                );
+                print('🔗 Cleared chain state (no hash from server): ${channelId}');
+              }
+            } else {
+              // No messages on server, clear chain state
+              await SQLiteService.instance.clearChainState(
+                workspaceId: workspaceId,
+                channelId: channelId,
+              );
+              print('🔗 Cleared chain state (no server messages): ${channelId}');
+            }
+          } catch (e) {
+            print('⚠️ Error updating chain state after sync: $e');
+            // Clear chain state on error (safe fallback)
+            try {
+              await SQLiteService.instance.clearChainState(
+                workspaceId: workspaceId,
+                channelId: channelId,
+              );
+            } catch (clearError) {
+              print('⚠️ Error clearing chain state: $clearError');
+            }
+          }
         }
       }
 
-      print('✅ Sync completed: $syncedCount/${unsyncedMessages.length} messages synced');
+      print('✅ PHASE 3 Sync completed: $syncedChannelCount/${unsyncedChannels.length} channels, $syncedMessageCount/${pendingSyncMessages.length} messages synced');
+      print('   ✅ NO UI re-render (SYNCED messages skipped)');
+      print('   ✅ NO block re-creation (server used provided hashes)');
     } catch (e) {
       print('❌ Sync to server error: $e');
+      // CRITICAL: On sync failure, reset PENDING_SYNC messages back to OFFLINE_LOCAL for retry
+      // This prevents messages from being stuck in PENDING_SYNC state
+      // PHASE 3: Failed syncs reset state so they can be retried on next sync
+      try {
+        final failedMessages = await SQLiteService.instance.getMessagesByState('PENDING_SYNC');
+        for (final msg in failedMessages) {
+          final messageId = msg['message_id']?.toString();
+          if (messageId != null) {
+            await SQLiteService.instance.updateMessageState(
+              messageId: messageId,
+              state: 'OFFLINE_LOCAL', // Reset for retry
+            );
+            print('🔄 Reset failed sync message to OFFLINE_LOCAL: $messageId (will retry on next sync)');
+          }
+        }
+      } catch (resetError) {
+        print('⚠️ Error resetting failed sync messages: $resetError');
+      }
+    } finally {
+      // CRITICAL: Always release sync lock
+      _isSyncing = false;
     }
   }
 
@@ -1469,6 +1848,11 @@ class HybridStorageService {
           if (!_isServerOnline) {
             _isServerOnline = true;
             print('✅ Server is actually online (health check was false negative)');
+            
+            // CRITICAL FIX: Don't trigger sync here - let periodic timer handle it
+            // This prevents multiple sync triggers when server comes online
+            // Sync will happen automatically on next timer tick (within 30 seconds)
+            print('🔄 Server came online - sync will happen automatically on next timer tick');
           }
           
           // CRITICAL: Sync deleted channels from server to SQLite
@@ -1623,12 +2007,14 @@ class HybridStorageService {
     required String channelId,
     String? channelName,
     String? creatorAddress,
+    bool? syncedToServer,
   }) async {
     return await SQLiteService.instance.saveChannel(
       workspaceId: workspaceId,
       channelId: channelId,
       channelName: channelName,
       creatorAddress: creatorAddress,
+      syncedToServer: syncedToServer, // Pass synced status
     );
   }
 

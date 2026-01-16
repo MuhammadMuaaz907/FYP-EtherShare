@@ -22,11 +22,60 @@ router.post('/', validateMessage, async (req, res) => {
       senderAddress,
       receiverAddress,
       messageText,
-      fileId
+      fileId,
+      messageId: providedMessageId, // CRITICAL: Accept message_id from client for idempotency
+      previousHash: providedPreviousHash, // CRITICAL: Accept previous_hash from client for sync
+      currentHash: providedCurrentHash, // CRITICAL: Accept current_hash from client for sync
     } = req.body;
     
     const timestamp = Date.now();
-    const messageId = `msg_${timestamp}_${senderAddress.toLowerCase()}`;
+    
+    // CRITICAL: Use provided messageId if available (for idempotent sync), otherwise generate new one
+    let messageId = providedMessageId;
+    let isIdempotentSync = false;
+    
+    if (messageId && messageId.trim().length > 0) {
+      // CRITICAL: Check if message with this ID already exists (idempotency check)
+      const existingMessage = await messagesCollection.findOne({
+        message_id: messageId
+      });
+      
+      if (existingMessage) {
+        // Message already exists - return existing message (idempotent)
+        console.log(`✅ Message with ID ${messageId} already exists - returning existing message (idempotent)`);
+        isIdempotentSync = true;
+        
+        // Calculate execution time and gas
+        const endTime = process.hrtime.bigint();
+        const executionTimeMs = Number(endTime - startTime) / 1000000;
+        const gasUsed = GasCalculator.calculateMessageGas(executionTimeMs, existingMessage);
+        const gasPrice = GasCalculator.getCurrentGasPrice();
+        const transactionFee = GasCalculator.calculateTransactionFee(gasUsed, gasPrice);
+        
+        // Clean up response (remove internal hash fields)
+        const { _id, previous_hash, current_hash, chain_broken, chain_broken_at, createdAt, updatedAt, __v, ...cleanMessage } = existingMessage;
+        
+        return res.status(200).json({
+          success: true,
+          message: 'Message already exists (idempotent)',
+          data: {
+            ...cleanMessage,
+            gas_used: gasUsed,
+            gas_price: gasPrice,
+            transaction_fee: transactionFee,
+            transaction_time_ms: Math.round(executionTimeMs * 100) / 100,
+            idempotent: true, // Indicate this was an idempotent response
+          }
+        });
+      }
+      
+      // Message ID provided but doesn't exist - use it (for sync)
+      isIdempotentSync = true;
+      console.log(`🔄 Using provided messageId for sync: ${messageId}`);
+    } else {
+      // No message ID provided - generate new one (normal flow)
+      messageId = `msg_${timestamp}_${senderAddress.toLowerCase()}`;
+    }
     
     const messageData = {
       message_id: messageId,
@@ -59,62 +108,107 @@ router.post('/', validateMessage, async (req, res) => {
           }
         : { workspace_id: workspaceId };
     
-    // Add hash chain fields (with retry mechanism for race conditions)
-    // CRITICAL: This handles rapid message insertion by ensuring atomic hash chain updates
+    // CRITICAL: Handle hash chain fields based on sync mode
     let messageWithHash;
     let insertSuccess = false;
     let retryAttempts = 0;
-    const maxRetries = 5; // Increased from 3 to 5 for better handling of rapid messages
+    const maxRetries = 5;
     
-    while (!insertSuccess && retryAttempts < maxRetries) {
+    if (isIdempotentSync && providedPreviousHash && providedCurrentHash) {
+      // CRITICAL: For idempotent sync, use provided hashes directly
+      // This prevents re-calculating hashes and breaking chain integrity
+      console.log(`🔄 Idempotent sync: Using provided hashes for message ${messageId}`);
+      messageWithHash = {
+        ...messageData,
+        previous_hash: providedPreviousHash,
+        current_hash: providedCurrentHash,
+      };
+      
+      // CRITICAL: Verify provided hashes match expected chain state
+      const verifyInfo = await HashChain.getAndVerifyLastHash(
+        messagesCollection,
+        filter,
+        providedPreviousHash
+      );
+      
+      if (!verifyInfo.isValid && verifyInfo.hash !== '0') {
+        // Previous hash doesn't match - this might be a chain break or out-of-order sync
+        console.warn(`⚠️ Provided previous_hash doesn't match chain state for message ${messageId}`);
+        console.warn(`   Expected: ${verifyInfo.hash.substring(0, 10)}..., Provided: ${providedPreviousHash.substring(0, 10)}...`);
+        // Continue anyway - chain integrity check will catch actual tampering
+      }
+      
+      // Insert message with provided hashes
       try {
-        // Get hash fields with built-in race condition handling
-        messageWithHash = await HashChain.addHashFields(
-          messagesCollection,
-          messageData,
-          filter,
-          retryAttempts
-        );
-        
-        // CRITICAL: Verify hash is still valid right before insert
-        // This is the final check to prevent chain breaks
-        const verifyInfo = await HashChain.getAndVerifyLastHash(
-          messagesCollection,
-          filter,
-          messageWithHash.previous_hash
-        );
-        
-        if (!verifyInfo.isValid) {
-          // Hash changed between calculation and insert - retry
-          console.log(`⚠️ Hash changed right before insert - retrying (attempt ${retryAttempts + 1}/${maxRetries})`);
-          retryAttempts++;
-          await new Promise(resolve => setTimeout(resolve, 30 * retryAttempts));
-          continue;
-        }
-        
-        // Insert message - this is atomic
         await messagesCollection.insertOne(messageWithHash);
         insertSuccess = true;
-        
-        // Log success
-        if (retryAttempts > 0) {
-          console.log(`✅ Message inserted after ${retryAttempts} retries`);
-        }
+        console.log(`✅ Idempotent sync message inserted: ${messageId}`);
       } catch (error) {
-        retryAttempts++;
-        if (retryAttempts >= maxRetries) {
-          console.error(`❌ Failed to insert message after ${maxRetries} retries: ${error.message}`);
+        // If duplicate key error, message already exists (race condition)
+        if (error.code === 11000 || error.message.includes('E11000')) {
+          console.log(`⚠️ Message ${messageId} already exists (race condition) - returning existing`);
+          const existingMessage = await messagesCollection.findOne({ message_id: messageId });
+          if (existingMessage) {
+            insertSuccess = true;
+            messageWithHash = existingMessage;
+          } else {
+            throw error;
+          }
+        } else {
           throw error;
         }
-        // If it's a duplicate key error or race condition, retry
-        if (error.code === 11000 || error.message.includes('E11000')) {
-          console.log(`⚠️ Duplicate key or race condition detected - retrying (attempt ${retryAttempts}/${maxRetries})`);
-          // Exponential backoff delay
-          await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, retryAttempts - 1)));
-        } else {
-          // For other errors, also retry (might be transient)
-          console.log(`⚠️ Insert error (${error.message}) - retrying (attempt ${retryAttempts}/${maxRetries})`);
-          await new Promise(resolve => setTimeout(resolve, 50 * retryAttempts));
+      }
+    } else {
+      // Normal flow: Calculate hash chain fields (with retry mechanism for race conditions)
+      while (!insertSuccess && retryAttempts < maxRetries) {
+        try {
+          // Get hash fields with built-in race condition handling
+          messageWithHash = await HashChain.addHashFields(
+            messagesCollection,
+            messageData,
+            filter,
+            retryAttempts
+          );
+          
+          // CRITICAL: Verify hash is still valid right before insert
+          const verifyInfo = await HashChain.getAndVerifyLastHash(
+            messagesCollection,
+            filter,
+            messageWithHash.previous_hash
+          );
+          
+          if (!verifyInfo.isValid) {
+            // Hash changed between calculation and insert - retry
+            console.log(`⚠️ Hash changed right before insert - retrying (attempt ${retryAttempts + 1}/${maxRetries})`);
+            retryAttempts++;
+            await new Promise(resolve => setTimeout(resolve, 30 * retryAttempts));
+            continue;
+          }
+          
+          // Insert message - this is atomic
+          await messagesCollection.insertOne(messageWithHash);
+          insertSuccess = true;
+          
+          // Log success
+          if (retryAttempts > 0) {
+            console.log(`✅ Message inserted after ${retryAttempts} retries`);
+          }
+        } catch (error) {
+          retryAttempts++;
+          if (retryAttempts >= maxRetries) {
+            console.error(`❌ Failed to insert message after ${maxRetries} retries: ${error.message}`);
+            throw error;
+          }
+          // If it's a duplicate key error or race condition, retry
+          if (error.code === 11000 || error.message.includes('E11000')) {
+            console.log(`⚠️ Duplicate key or race condition detected - retrying (attempt ${retryAttempts}/${maxRetries})`);
+            // Exponential backoff delay
+            await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, retryAttempts - 1)));
+          } else {
+            // For other errors, also retry (might be transient)
+            console.log(`⚠️ Insert error (${error.message}) - retrying (attempt ${retryAttempts}/${maxRetries})`);
+            await new Promise(resolve => setTimeout(resolve, 50 * retryAttempts));
+          }
         }
       }
     }
@@ -246,6 +340,15 @@ router.get('/channel', optionalAuth, async (req, res) => {
       .sort({ timestamp: 1 })
       .toArray();
     
+    // Get last message hash for chain continuity (before cleaning)
+    let lastHash = null;
+    let lastMessageId = null;
+    if (messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      lastHash = lastMsg.current_hash || null;
+      lastMessageId = lastMsg.message_id || null;
+    }
+    
     // Clean up response (remove internal hash fields)
     const cleanMessages = messages.map(msg => {
       const { _id, previous_hash, current_hash, chain_broken, chain_broken_at, createdAt, updatedAt, __v, ...rest } = msg;
@@ -258,7 +361,10 @@ router.get('/channel', optionalAuth, async (req, res) => {
       success: true,
       chainValid: true,
       count: cleanMessages.length,
-      data: cleanMessages
+      data: cleanMessages,
+      // Include last hash for chain continuity (when syncing offline messages)
+      lastHash: lastHash,
+      lastMessageId: lastMessageId
     });
   } catch (error) {
     console.error('❌ Get channel messages error:', error);

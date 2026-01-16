@@ -35,7 +35,7 @@ class SQLiteService {
 
     return await openDatabase(
       path,
-      version: 3, // Updated version for complete MongoDB-aligned schema
+      version: 5, // Updated version for message_state column
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -83,7 +83,8 @@ class SQLiteService {
         timestamp INTEGER,
         previous_hash TEXT,
         current_hash TEXT,
-        synced_to_server INTEGER DEFAULT 0
+        synced_to_server INTEGER DEFAULT 0,
+        message_state TEXT DEFAULT 'OFFLINE_LOCAL'
       )
     ''');
 
@@ -144,12 +145,26 @@ class SQLiteService {
       )
     ''');
 
+    // Chain state table - stores last server hash per channel for chain continuity
+    await db.execute('''
+      CREATE TABLE chain_state (
+        workspace_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        last_server_hash TEXT NOT NULL,
+        last_server_message_id TEXT,
+        last_server_timestamp INTEGER,
+        updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+        PRIMARY KEY (workspace_id, channel_id)
+      )
+    ''');
+
     // Create indexes for better performance
     await db.execute('CREATE INDEX idx_messages_workspace ON messages(workspace_id)');
     await db.execute('CREATE INDEX idx_messages_channel ON messages(channel_id)');
     await db.execute('CREATE INDEX idx_messages_sender ON messages(sender_address)');
     await db.execute('CREATE INDEX idx_messages_receiver ON messages(receiver_address)');
     await db.execute('CREATE INDEX idx_messages_timestamp ON messages(timestamp)');
+    await db.execute('CREATE INDEX idx_messages_state ON messages(message_state)'); // CRITICAL: Index for state filtering
     await db.execute('CREATE INDEX idx_members_workspace ON members(workspace_id)');
     await db.execute('CREATE INDEX idx_members_address ON members(member_address)');
     await db.execute('CREATE INDEX idx_channels_workspace ON channels(workspace_id)');
@@ -157,6 +172,8 @@ class SQLiteService {
     await db.execute('CREATE INDEX idx_channels_creator ON channels(creator_address)');
     await db.execute('CREATE INDEX idx_peers_address ON peers(user_address)');
     await db.execute('CREATE INDEX idx_workspaces_inviter ON workspaces(inviter_address)');
+    await db.execute('CREATE INDEX idx_chain_state_workspace ON chain_state(workspace_id)');
+    await db.execute('CREATE INDEX idx_chain_state_channel ON chain_state(channel_id)');
 
     print('✅ SQLite tables created successfully');
   }
@@ -256,6 +273,73 @@ class SQLiteService {
         print('✅ Channels table upgraded to version 3 successfully');
       } catch (e) {
         print('❌ Error upgrading channels table: $e');
+        // Continue anyway - partial upgrade is better than nothing
+      }
+    }
+    
+    // Migration from version 3 to 4: Add chain_state table for chain continuity
+    if (oldVersion < 4) {
+      print('📦 Adding chain_state table for version 4 (chain continuity)...');
+      try {
+        // Check if chain_state table exists
+        final tables = await db.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='chain_state'"
+        );
+        
+        if (tables.isEmpty) {
+          // Create chain_state table
+          await db.execute('''
+            CREATE TABLE chain_state (
+              workspace_id TEXT NOT NULL,
+              channel_id TEXT NOT NULL,
+              last_server_hash TEXT NOT NULL,
+              last_server_message_id TEXT,
+              last_server_timestamp INTEGER,
+              updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+              PRIMARY KEY (workspace_id, channel_id)
+            )
+          ''');
+          
+          // Create indexes
+          await db.execute('CREATE INDEX IF NOT EXISTS idx_chain_state_workspace ON chain_state(workspace_id)');
+          await db.execute('CREATE INDEX IF NOT EXISTS idx_chain_state_channel ON chain_state(channel_id)');
+          
+          print('✅ Chain state table created successfully');
+        } else {
+          print('ℹ️ Chain state table already exists');
+        }
+      } catch (e) {
+        print('❌ Error creating chain_state table: $e');
+        // Continue anyway - partial upgrade is better than nothing
+      }
+    }
+    
+    // Migration from version 4 to 5: Add message_state column for state tracking
+    if (oldVersion < 5) {
+      print('📦 Adding message_state column for version 5 (message state tracking)...');
+      try {
+        // Check if message_state column exists
+        final columns = await db.rawQuery("PRAGMA table_info(messages)");
+        final columnNames = columns.map((c) => c['name'] as String).toSet();
+        
+        if (!columnNames.contains('message_state')) {
+          await db.execute('ALTER TABLE messages ADD COLUMN message_state TEXT DEFAULT \'OFFLINE_LOCAL\'');
+          
+          // Update existing messages: synced_to_server=1 -> ONLINE_CONFIRMED, synced_to_server=0 -> OFFLINE_LOCAL
+          await db.execute('''
+            UPDATE messages 
+            SET message_state = CASE 
+              WHEN synced_to_server = 1 THEN 'ONLINE_CONFIRMED'
+              ELSE 'OFFLINE_LOCAL'
+            END
+          ''');
+          
+          print('✅ Message state column added successfully');
+        } else {
+          print('ℹ️ Message state column already exists');
+        }
+      } catch (e) {
+        print('❌ Error adding message_state column: $e');
         // Continue anyway - partial upgrade is better than nothing
       }
     }
@@ -530,6 +614,7 @@ class SQLiteService {
     required String messageText,
     String? fileId,
     String? providedMessageId, // Allow providing message ID for consistency
+    String? messageState, // Optional: message state (ONLINE_CONFIRMED, OFFLINE_LOCAL, PENDING_SYNC, SYNCED)
   }) async {
     try {
       final db = await database;
@@ -552,17 +637,55 @@ class SQLiteService {
       }
 
       // Get previous hash for chain
+      // CRITICAL: First check if we have a stored server hash (when server was offline)
+      // This ensures chain continuity when syncing back to server
+      String? storedServerHash;
+      if (channelId != null) {
+        storedServerHash = await getLastServerHash(
+          workspaceId: workspaceId,
+          channelId: channelId,
+        );
+      }
+      
+      // Get last SQLite message hash
       final lastMessage = await db.query(
         'messages',
-        where: 'workspace_id = ?',
-        whereArgs: [workspaceId],
+        where: 'workspace_id = ? AND channel_id = ?',
+        whereArgs: [workspaceId, channelId ?? ''],
         orderBy: 'timestamp DESC',
         limit: 1,
       );
 
       String previousHash = '0';
-      if (lastMessage.isNotEmpty) {
+      
+      // If we have stored server hash and no SQLite messages, use server hash
+      // This links SQLite chain to server chain
+      if (storedServerHash != null && lastMessage.isEmpty) {
+        previousHash = storedServerHash;
+        print('🔗 Using stored server hash as previous_hash: ${storedServerHash.substring(0, 10)}...');
+      } else if (lastMessage.isNotEmpty) {
+        // Use last SQLite message hash (normal case)
         previousHash = lastMessage.first['current_hash'] as String? ?? '0';
+      } else if (storedServerHash != null && lastMessage.isNotEmpty) {
+        // CRITICAL FIX: If we have stored server hash AND SQLite messages,
+        // we need to check if SQLite messages are synced or not
+        // If SQLite messages are NOT synced, they should use stored server hash
+        // If SQLite messages ARE synced, they should use SQLite's last hash (chain continues from SQLite)
+        
+        // Check if last SQLite message is synced
+        final lastMsgSynced = lastMessage.first['synced_to_server'] as int? ?? 0;
+        
+        if (lastMsgSynced == 0) {
+          // Last SQLite message is NOT synced - use stored server hash
+          // This ensures offline messages link to server's chain when syncing
+          previousHash = storedServerHash;
+          print('🔗 Using stored server hash (SQLite messages not synced yet): ${storedServerHash.substring(0, 10)}...');
+        } else {
+          // Last SQLite message IS synced - use SQLite's last hash
+          // Chain continues from SQLite (messages already synced)
+          previousHash = lastMessage.first['current_hash'] as String? ?? '0';
+          print('🔗 Using SQLite hash (messages already synced): ${previousHash.substring(0, 10)}...');
+        }
       }
 
       // Calculate current hash
@@ -577,6 +700,10 @@ class SQLiteService {
       };
       final currentHash = _calculateHash(dataToHash);
 
+      // Determine message state
+      // If state provided, use it; otherwise default based on sync status
+      final state = messageState ?? 'OFFLINE_LOCAL';
+      
       // Use conflictAlgorithm to handle race conditions gracefully
       // If message_id already exists (race condition), ignore the insert
       await db.insert(
@@ -593,6 +720,7 @@ class SQLiteService {
           'previous_hash': previousHash,
           'current_hash': currentHash,
           'synced_to_server': 0,
+          'message_state': state, // CRITICAL: Track message state
         },
         conflictAlgorithm: ConflictAlgorithm.ignore, // Ignore if duplicate (race condition)
       );
@@ -654,6 +782,7 @@ class SQLiteService {
         'fileId': m['file_id'],
         'timestamp': m['timestamp'],
         'content': m['message_text'], // Add content field for UI compatibility
+        'message_state': m['message_state'], // PHASE 4: Include message state for UI indicators
       }).toList();
     } catch (e) {
       print('❌ Get channel messages error: $e');
@@ -757,19 +886,78 @@ class SQLiteService {
 
   // ============ SYNC OPERATIONS ============
 
-  /// Get unsynced messages
+  /// Get unsynced messages (messages with state PENDING_SYNC or OFFLINE_LOCAL)
+  /// Used for marking OFFLINE_LOCAL as PENDING_SYNC before sync
   Future<List<Map<String, dynamic>>> getUnsyncedMessages() async {
     try {
       final db = await database;
+      // CRITICAL: Only get messages that need syncing (PENDING_SYNC or OFFLINE_LOCAL)
+      // Exclude messages already synced (SYNCED, ONLINE_CONFIRMED)
       return await db.query(
         'messages',
-        where: 'synced_to_server = ?',
-        whereArgs: [0],
+        where: 'message_state IN (?, ?) OR (synced_to_server = ? AND message_state IS NULL)',
+        whereArgs: ['PENDING_SYNC', 'OFFLINE_LOCAL', 0],
         orderBy: 'timestamp ASC',
       );
     } catch (e) {
       print('❌ Get unsynced messages error: $e');
       return [];
+    }
+  }
+  
+  /// Get messages by state (PHASE 3: Fetch messages WHERE state = PENDING_SYNC)
+  Future<List<Map<String, dynamic>>> getMessagesByState(String state) async {
+    try {
+      final db = await database;
+      return await db.query(
+        'messages',
+        where: 'message_state = ?',
+        whereArgs: [state],
+        orderBy: 'timestamp ASC',
+      );
+    } catch (e) {
+      print('❌ Get messages by state error: $e');
+      return [];
+    }
+  }
+
+  /// Get unsynced channels (created offline, not yet synced to server)
+  Future<List<Map<String, dynamic>>> getUnsyncedChannels() async {
+    try {
+      final db = await database;
+      return await db.query(
+        'channels',
+        where: 'synced_to_server = ? AND deleted = 0',
+        whereArgs: [0],
+        orderBy: 'timestamp ASC',
+      );
+    } catch (e) {
+      print('❌ Get unsynced channels error: $e');
+      return [];
+    }
+  }
+
+  /// Mark channel as synced to server
+  Future<bool> markChannelSynced({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      final db = await database;
+      final normalizedChannelId = channelId.toLowerCase().trim();
+      
+      await db.update(
+        'channels',
+        {'synced_to_server': 1},
+        where: 'workspace_id = ? AND channel_id = ?',
+        whereArgs: [workspaceId, normalizedChannelId],
+      );
+      
+      print('✅ Channel marked as synced: $channelId in workspace $workspaceId');
+      return true;
+    } catch (e) {
+      print('❌ Mark channel synced error: $e');
+      return false;
     }
   }
 
@@ -779,13 +967,45 @@ class SQLiteService {
       final db = await database;
       await db.update(
         'messages',
-        {'synced_to_server': 1},
+        {
+          'synced_to_server': 1,
+          'message_state': 'SYNCED', // CRITICAL: Update state to SYNCED
+        },
         where: 'message_id = ?',
         whereArgs: [messageId],
       );
       return true;
     } catch (e) {
       print('❌ Mark message synced error: $e');
+      return false;
+    }
+  }
+  
+  /// Update message state
+  Future<bool> updateMessageState({
+    required String messageId,
+    required String state, // ONLINE_CONFIRMED, OFFLINE_LOCAL, PENDING_SYNC, SYNCED
+  }) async {
+    try {
+      final db = await database;
+      final rowsAffected = await db.update(
+        'messages',
+        {
+          'message_state': state,
+          'synced_to_server': (state == 'SYNCED' || state == 'ONLINE_CONFIRMED') ? 1 : 0,
+        },
+        where: 'message_id = ?',
+        whereArgs: [messageId],
+      );
+      
+      if (rowsAffected > 0) {
+        print('✅ Updated message state: $messageId -> $state');
+        return true;
+      }
+      
+      return false;
+    } catch (e) {
+      print('❌ Update message state error: $e');
       return false;
     }
   }
@@ -849,6 +1069,38 @@ class SQLiteService {
       return (result.first['synced_to_server'] as int? ?? 0) == 1;
     } catch (e) {
       print('❌ Check message synced error: $e');
+      return false;
+    }
+  }
+
+  /// Update message hash (for chain integrity after sync)
+  /// This updates the hash of a message after it's synced to server
+  /// to match the server's calculated hash
+  Future<bool> updateMessageHash({
+    required String messageId,
+    required String previousHash,
+    required String currentHash,
+  }) async {
+    try {
+      final db = await database;
+      final rowsAffected = await db.update(
+        'messages',
+        {
+          'previous_hash': previousHash,
+          'current_hash': currentHash,
+        },
+        where: 'message_id = ?',
+        whereArgs: [messageId],
+      );
+      
+      if (rowsAffected > 0) {
+        print('✅ Updated message hash: $messageId');
+        return true;
+      }
+      
+      return false;
+    } catch (e) {
+      print('❌ Update message hash error: $e');
       return false;
     }
   }
@@ -1085,10 +1337,12 @@ class SQLiteService {
       bool shouldMarkDeleted = deleted ?? false;
       if (deleted == null) {
         // deleted parameter not provided - check existing channel status
+        // CRITICAL: Normalize channel_id for comparison (spaces -> hyphens)
+        final normalizedChannelIdForQuery = normalizedChannelId.replaceAll(RegExp(r'\s+'), '-');
         final existingChannel = await db.query(
           'channels',
           where: 'workspace_id = ? AND channel_id = ?',
-          whereArgs: [workspaceId, normalizedChannelId],
+          whereArgs: [workspaceId, normalizedChannelIdForQuery],
           limit: 1,
         );
         
@@ -1102,11 +1356,16 @@ class SQLiteService {
         }
       }
       
+      // CRITICAL: Use normalized channel_id for database storage (consistent with backend)
+      // Backend stores channel_id with spaces replaced by hyphens
+      // This ensures consistency across all devices
+      final normalizedChannelIdForStorage = normalizedChannelId.replaceAll(RegExp(r'\s+'), '-');
+      
       // Prepare channel data (MongoDB-aligned)
       final channelData = {
-        'channel_id': channelId,
+        'channel_id': normalizedChannelIdForStorage, // Use normalized ID for storage
         'workspace_id': workspaceId,
-        'channel_name': channelName ?? channelId,
+        'channel_name': channelName ?? normalizedChannelIdForStorage, // Use display name or normalized ID
         'creator_address': creatorAddress,
         'members': members != null ? jsonEncode(members) : '[]',  // Store as JSON array
         'is_private': (isPrivate ?? false) ? 1 : 0,
@@ -1125,7 +1384,7 @@ class SQLiteService {
           channelData,
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
-        print('✅ Channel saved to SQLite: $channelName (ID: $channelId, deleted: $shouldMarkDeleted)');
+        print('✅ Channel saved to SQLite: $channelName (ID: $normalizedChannelIdForStorage, deleted: $shouldMarkDeleted)');
         return true;
       } catch (e) {
         // Table might not exist or schema mismatch, try to create/upgrade
@@ -1171,9 +1430,9 @@ class SQLiteService {
             await db.insert(
               'channels',
               {
-                'channel_id': channelId,
+                'channel_id': normalizedChannelIdForStorage, // Use normalized ID
                 'workspace_id': workspaceId,
-                'channel_name': channelName ?? channelId,
+                'channel_name': channelName ?? normalizedChannelIdForStorage,
                 'creator_address': creatorAddress,
                 'created_at': now,
                 'is_default': isDefaultChannel ? 1 : 0,
@@ -1201,7 +1460,7 @@ class SQLiteService {
   }) async {
     try {
       final db = await database;
-      final normalizedChannelId = channelId.toLowerCase().trim();
+      final normalizedChannelId = channelId.toLowerCase().trim().replaceAll(RegExp(r'\s+'), '-');
       
       // Update channel to mark as deleted
       final rowsAffected = await db.update(
@@ -1246,6 +1505,124 @@ class SQLiteService {
     } catch (e) {
       print('❌ Get all channel IDs error: $e');
       return [];
+    }
+  }
+
+  // ============ CHAIN STATE OPERATIONS ============
+  /// Save last server hash for a channel (for chain continuity when server goes offline)
+  /// This ensures SQLite messages can properly link to server's chain when syncing
+  Future<bool> saveChainState({
+    required String workspaceId,
+    required String channelId,
+    required String lastServerHash,
+    String? lastServerMessageId,
+    int? lastServerTimestamp,
+  }) async {
+    try {
+      final db = await database;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      
+      await db.insert(
+        'chain_state',
+        {
+          'workspace_id': workspaceId,
+          'channel_id': channelId,
+          'last_server_hash': lastServerHash,
+          'last_server_message_id': lastServerMessageId,
+          'last_server_timestamp': lastServerTimestamp ?? now,
+          'updated_at': now,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      
+      print('✅ Chain state saved: workspace=$workspaceId, channel=$channelId, hash=${lastServerHash.substring(0, 10)}...');
+      return true;
+    } catch (e) {
+      print('❌ Save chain state error: $e');
+      return false;
+    }
+  }
+
+  /// Get last server hash for a channel (returns null if not found)
+  Future<String?> getLastServerHash({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      final db = await database;
+      final result = await db.query(
+        'chain_state',
+        columns: ['last_server_hash'],
+        where: 'workspace_id = ? AND channel_id = ?',
+        whereArgs: [workspaceId, channelId],
+        limit: 1,
+      );
+      
+      if (result.isNotEmpty) {
+        final hash = result.first['last_server_hash'] as String?;
+        print('✅ Retrieved chain state: workspace=$workspaceId, channel=$channelId, hash=${hash?.substring(0, 10)}...');
+        return hash;
+      }
+      
+      return null;
+    } catch (e) {
+      print('❌ Get last server hash error: $e');
+      return null;
+    }
+  }
+
+  /// Get full chain state for a channel
+  Future<Map<String, dynamic>?> getChainState({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      final db = await database;
+      final result = await db.query(
+        'chain_state',
+        where: 'workspace_id = ? AND channel_id = ?',
+        whereArgs: [workspaceId, channelId],
+        limit: 1,
+      );
+      
+      if (result.isNotEmpty) {
+        return {
+          'last_server_hash': result.first['last_server_hash'],
+          'last_server_message_id': result.first['last_server_message_id'],
+          'last_server_timestamp': result.first['last_server_timestamp'],
+          'updated_at': result.first['updated_at'],
+        };
+      }
+      
+      return null;
+    } catch (e) {
+      print('❌ Get chain state error: $e');
+      return null;
+    }
+  }
+
+  /// Clear chain state for a channel (after successful sync)
+  Future<bool> clearChainState({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      final db = await database;
+      final rowsAffected = await db.delete(
+        'chain_state',
+        where: 'workspace_id = ? AND channel_id = ?',
+        whereArgs: [workspaceId, channelId],
+      );
+      
+      if (rowsAffected > 0) {
+        print('✅ Chain state cleared: workspace=$workspaceId, channel=$channelId');
+        return true;
+      }
+      
+      return false;
+    } catch (e) {
+      print('❌ Clear chain state error: $e');
+      return false;
     }
   }
 

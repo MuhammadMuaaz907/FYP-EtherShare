@@ -31,14 +31,14 @@ router.post('/', optionalAuth, async (req, res) => {
     // Normalize channel name for comparison (case-insensitive)
     const normalizedChannelName = displayName.toLowerCase().trim();
     
-    // Check if channel ID already exists in this workspace
+    // Check if channel ID already exists in this workspace (including deleted channels)
     const existingChannelById = await channelsCollection.findOne({
       workspace_id: workspaceId,
-      channel_id: normalizedChannelId,
-      deleted: { $ne: true }
+      channel_id: normalizedChannelId
     });
     
-    if (existingChannelById) {
+    // If channel exists and is NOT deleted, reject creation
+    if (existingChannelById && !existingChannelById.deleted) {
       return res.status(409).json({
         success: false,
         error: 'Channel with this ID already exists in this workspace',
@@ -46,7 +46,80 @@ router.post('/', optionalAuth, async (req, res) => {
       });
     }
     
-    // Check if channel name already exists in this workspace (case-insensitive)
+    // If channel exists but is deleted, physically delete it and fix hash chain if needed
+    // CRITICAL: Maintain chain integrity by updating subsequent channels' previous_hash
+    if (existingChannelById && existingChannelById.deleted === true) {
+      console.log(`🗑️ Physically deleting deleted channel: ${normalizedChannelId} in workspace ${workspaceId}`);
+      
+      // Get the deleted channel's previous_hash (will be used to fix next channel)
+      const deletedChannelPreviousHash = existingChannelById.previous_hash || '0';
+      
+      // Get all channels after this one (by timestamp) to fix their hash chain
+      const subsequentChannels = await channelsCollection
+        .find({
+          workspace_id: workspaceId,
+          timestamp: { $gt: existingChannelById.timestamp },
+          deleted: { $ne: true } // Only fix non-deleted channels
+        })
+        .sort({ timestamp: 1 }) // Sort ascending to fix in order
+        .toArray();
+      
+      // Physically delete the deleted channel
+      await channelsCollection.deleteOne({
+        workspace_id: workspaceId,
+        channel_id: normalizedChannelId
+      });
+      
+      console.log(`✅ Deleted channel removed from database: ${normalizedChannelId}`);
+      
+      // If there are subsequent channels, fix their hash chain
+      if (subsequentChannels.length > 0) {
+        console.log(`🔧 Fixing hash chain for ${subsequentChannels.length} subsequent channel(s)...`);
+        
+        // Fix each subsequent channel's hash chain
+        let currentPreviousHash = deletedChannelPreviousHash;
+        
+        for (const nextChannel of subsequentChannels) {
+          // Update previous_hash to point to the deleted channel's previous_hash
+          // This maintains chain continuity
+          const channelDataForHash = {
+            channel_id: nextChannel.channel_id,
+            workspace_id: nextChannel.workspace_id,
+            channel_name: nextChannel.channel_name,
+            creator_address: nextChannel.creator_address,
+            members: nextChannel.members || [],
+            is_private: nextChannel.is_private || false,
+            is_default: nextChannel.is_default || false,
+            created_at: nextChannel.created_at,
+            timestamp: nextChannel.timestamp
+          };
+          
+          // Recalculate current_hash with new previous_hash
+          // Import HashChain at top level, using here for calculation
+          const newCurrentHash = HashChain.calculateHash(channelDataForHash, currentPreviousHash);
+          
+          // Update the channel with new hash chain
+          await channelsCollection.updateOne(
+            { workspace_id: workspaceId, channel_id: nextChannel.channel_id },
+            {
+              $set: {
+                previous_hash: currentPreviousHash,
+                current_hash: newCurrentHash
+              }
+            }
+          );
+          
+          console.log(`   ✅ Fixed hash chain for channel: ${nextChannel.channel_id}`);
+          
+          // Update currentPreviousHash for next iteration
+          currentPreviousHash = newCurrentHash;
+        }
+        
+        console.log(`✅ Hash chain fixed for all subsequent channels`);
+      }
+    }
+    
+    // Check if channel name already exists in this workspace (case-insensitive, only non-deleted)
     const existingChannelByName = await channelsCollection.findOne({
       workspace_id: workspaceId,
       $or: [
@@ -79,6 +152,7 @@ router.post('/', optionalAuth, async (req, res) => {
     // Default channels are accessible to all workspace members
     const isDefault = ['general', 'random'].includes(normalizedChannelId);
     
+    // Create new channel (deleted channel already removed if it existed)
     const channelData = {
       channel_id: normalizedChannelId,
       workspace_id: workspaceId,
@@ -126,10 +200,16 @@ router.post('/', optionalAuth, async (req, res) => {
       }
     );
     
+    // Fetch final channel data with gas info
+    const finalChannel = await channelsCollection.findOne({
+      workspace_id: workspaceId,
+      channel_id: normalizedChannelId
+    });
+    
     console.log(`✅ Channel created: ${normalizedChannelId} in workspace ${workspaceId} | Gas: ${gasUsed} | Time: ${Math.round(executionTimeMs * 100) / 100}ms`);
     
     // Remove internal fields from response
-    const { _id, previous_hash, current_hash, ...cleanChannel } = channelWithHash;
+    const { _id, previous_hash, current_hash, ...cleanChannel } = finalChannel;
     
     // Add gas info to response
     cleanChannel.gas_used = gasUsed;

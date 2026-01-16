@@ -1969,13 +1969,15 @@ class _TeamHomePageState extends State<TeamHomePage> {
 
       // CRITICAL: Save channel to SQLite immediately (for offline mode)
       // This ensures channel shows up even when server is off
+      // Mark as synced only if server creation succeeded
       await HybridStorageService.instance.saveChannelToSQLite(
         workspaceId: _workspaceId!,
         channelId: normalizedChannelName,
         channelName: channelName,
         creatorAddress: userAddress!,
+        syncedToServer: channelCreated, // Mark as synced only if server creation succeeded
       );
-      print('✅ Channel "$channelName" saved to SQLite for offline access');
+      print('✅ Channel "$channelName" saved to SQLite for offline access (synced: $channelCreated)');
 
       // CRITICAL: Broadcast channel creation via P2P to all workspace members
       // This ensures receiver devices know about the new channel even when server is off
