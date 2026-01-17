@@ -269,10 +269,13 @@ class P2PService {
     int? timestamp,
   }) async {
     try {
-      final existingMessages = await SQLiteService.instance.getChannelMessages(
+      final existingMessagesResult = await SQLiteService.instance.getChannelMessages(
         workspaceId: workspaceId,
         channelId: channelId,
       );
+      
+      // Extract messages list from the result map
+      final existingMessages = existingMessagesResult['messages'] as List<Map<String, dynamic>>? ?? [];
       
       return existingMessages.any((m) => 
         m['message_id']?.toString() == messageId ||

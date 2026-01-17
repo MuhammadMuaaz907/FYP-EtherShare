@@ -4,11 +4,57 @@ import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
 import 'dart:convert';
+import '../security/aes_crypto_service.dart';
+
+/// Chain verification result class
+/// Used to return detailed chain integrity status without throwing exceptions
+class ChainVerificationResult {
+  final bool isValid;
+  final String? failureReason; // 'previous_hash_mismatch', 'missing_parent', 'fork_detected', 'hash_mismatch'
+  final String? brokenAt; // message_id or workspace_id where chain broke
+  final Map<String, dynamic>? details; // Additional failure details
+
+  ChainVerificationResult({
+    required this.isValid,
+    this.failureReason,
+    this.brokenAt,
+    this.details,
+  });
+
+  /// Create success result
+  factory ChainVerificationResult.success() {
+    return ChainVerificationResult(isValid: true);
+  }
+
+  /// Create failure result
+  factory ChainVerificationResult.failure({
+    required String reason,
+    required String brokenAt,
+    Map<String, dynamic>? details,
+  }) {
+    return ChainVerificationResult(
+      isValid: false,
+      failureReason: reason,
+      brokenAt: brokenAt,
+      details: details ?? {},
+    );
+  }
+
+  /// Check if result indicates chain integrity failure
+  bool get isChainIntegrityFailed => !isValid;
+}
 
 /// SQLite Service for Local Database Storage
 /// Mirrors MongoDB functionality for offline support
 class SQLiteService {
   static SQLiteService? _instance;
+  
+  /// Safe substring helper to prevent RangeError
+  /// Returns substring of length [len] or full string if shorter
+  static String safeSubstring(String? str, int len) {
+    if (str == null || str.isEmpty) return '';
+    return str.length > len ? str.substring(0, len) : str;
+  }
   static Database? _database;
 
   // Singleton pattern
@@ -35,7 +81,7 @@ class SQLiteService {
 
     return await openDatabase(
       path,
-      version: 5, // Updated version for message_state column
+      version: 8, // Updated version for encrypted_message and iv columns
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -79,10 +125,14 @@ class SQLiteService {
         sender_address TEXT,
         receiver_address TEXT,
         message_text TEXT,
+        encrypted_message TEXT,
+        iv TEXT,
         file_id TEXT,
         timestamp INTEGER,
         previous_hash TEXT,
         current_hash TEXT,
+        payload_hash TEXT,
+        hash_version INTEGER DEFAULT 2,
         synced_to_server INTEGER DEFAULT 0,
         message_state TEXT DEFAULT 'OFFLINE_LOCAL'
       )
@@ -343,6 +393,99 @@ class SQLiteService {
         // Continue anyway - partial upgrade is better than nothing
       }
     }
+    
+    // Migration from version 5 to 6: Add payload_hash column for payload-based hashing
+    if (oldVersion < 6) {
+      print('📦 Adding payload_hash column for version 6 (payload-based hashing transition)...');
+      try {
+        // Check if payload_hash column exists
+        final columns = await db.rawQuery("PRAGMA table_info(messages)");
+        final columnNames = columns.map((c) => c['name'] as String).toSet();
+        
+        if (!columnNames.contains('payload_hash')) {
+          await db.execute('ALTER TABLE messages ADD COLUMN payload_hash TEXT');
+          
+          // Calculate payload_hash for existing messages (backfill)
+          final allMessages = await db.query('messages');
+          for (final msg in allMessages) {
+            final messageText = msg['message_text'] as String? ?? '';
+            if (messageText.isNotEmpty) {
+              final payloadHash = _calculatePayloadHash(messageText);
+              await db.update(
+                'messages',
+                {'payload_hash': payloadHash},
+                where: 'message_id = ?',
+                whereArgs: [msg['message_id']],
+              );
+            }
+          }
+          
+          print('✅ Payload hash column added and backfilled successfully');
+        } else {
+          print('ℹ️ Payload hash column already exists');
+        }
+      } catch (e) {
+        print('❌ Error adding payload_hash column: $e');
+        // Continue anyway - partial upgrade is better than nothing
+      }
+    }
+    
+    // Migration from version 6 to 7: Add hash_version column for version-based hashing
+    if (oldVersion < 7) {
+      print('📦 Adding hash_version column for version 7 (hash version migration)...');
+      try {
+        // Check if hash_version column exists
+        final columns = await db.rawQuery("PRAGMA table_info(messages)");
+        final columnNames = columns.map((c) => c['name'] as String).toSet();
+        
+        if (!columnNames.contains('hash_version')) {
+          await db.execute('ALTER TABLE messages ADD COLUMN hash_version INTEGER DEFAULT 1');
+          
+          // Existing messages without hash_version are treated as version 1 (plaintext hashing)
+          // New messages will use version 2 (payload_hash hashing)
+          // No need to update existing messages - they default to 1 which is correct
+          
+          print('✅ Hash version column added successfully (existing messages default to v1)');
+        } else {
+          print('ℹ️ Hash version column already exists');
+        }
+      } catch (e) {
+        print('❌ Error adding hash_version column: $e');
+        // Continue anyway - partial upgrade is better than nothing
+      }
+    }
+    
+    // Migration from version 7 to 8: Add encrypted_message and iv columns for AES encryption
+    if (oldVersion < 8) {
+      print('📦 Adding encrypted_message and iv columns for version 8 (AES encryption)...');
+      try {
+        // Check if encrypted_message and iv columns exist
+        final columns = await db.rawQuery("PRAGMA table_info(messages)");
+        final columnNames = columns.map((c) => c['name'] as String).toSet();
+        
+        if (!columnNames.contains('encrypted_message')) {
+          await db.execute('ALTER TABLE messages ADD COLUMN encrypted_message TEXT');
+          print('✅ encrypted_message column added successfully');
+        } else {
+          print('ℹ️ encrypted_message column already exists');
+        }
+        
+        if (!columnNames.contains('iv')) {
+          await db.execute('ALTER TABLE messages ADD COLUMN iv TEXT');
+          print('✅ iv column added successfully');
+        } else {
+          print('ℹ️ iv column already exists');
+        }
+        
+        // Note: Existing messages keep message_text for backward compatibility
+        // New messages will use encrypted_message instead
+        
+        print('✅ Encryption columns added successfully (existing messages remain unencrypted for compatibility)');
+      } catch (e) {
+        print('❌ Error adding encryption columns: $e');
+        // Continue anyway - partial upgrade is better than nothing
+      }
+    }
   }
 
   // ============ USER OPERATIONS ============
@@ -572,7 +715,7 @@ class SQLiteService {
         await db.update(
           'members',
           {
-            'display_name': displayName ?? normalizedAddress.substring(0, 10),
+            'display_name': displayName ?? safeSubstring(normalizedAddress, 10),
             'joined_at': now,
           },
           where: 'workspace_id = ? AND member_address = ?',
@@ -662,7 +805,7 @@ class SQLiteService {
       // This links SQLite chain to server chain
       if (storedServerHash != null && lastMessage.isEmpty) {
         previousHash = storedServerHash;
-        print('🔗 Using stored server hash as previous_hash: ${storedServerHash.substring(0, 10)}...');
+        print('🔗 Using stored server hash as previous_hash: ${safeSubstring(storedServerHash, 10)}...');
       } else if (lastMessage.isNotEmpty) {
         // Use last SQLite message hash (normal case)
         previousHash = lastMessage.first['current_hash'] as String? ?? '0';
@@ -679,53 +822,237 @@ class SQLiteService {
           // Last SQLite message is NOT synced - use stored server hash
           // This ensures offline messages link to server's chain when syncing
           previousHash = storedServerHash;
-          print('🔗 Using stored server hash (SQLite messages not synced yet): ${storedServerHash.substring(0, 10)}...');
+          print('🔗 Using stored server hash (SQLite messages not synced yet): ${safeSubstring(storedServerHash, 10)}...');
         } else {
           // Last SQLite message IS synced - use SQLite's last hash
           // Chain continues from SQLite (messages already synced)
           previousHash = lastMessage.first['current_hash'] as String? ?? '0';
-          print('🔗 Using SQLite hash (messages already synced): ${previousHash.substring(0, 10)}...');
+          print('🔗 Using SQLite hash (messages already synced): ${safeSubstring(previousHash, 10)}...');
         }
       }
 
-      // Calculate current hash
+      // CRITICAL: Calculate payload_hash from PLAINTEXT message_text
+      // This must happen BEFORE encryption to ensure hash chain integrity
+      // payload_hash is used in hash chain verification and must remain stable
+      // 
+      // SECURITY RULE: payload_hash is derived from plaintext ONLY (encryption-independent)
+      // - Encryption randomness (AES-CBC IV) must NOT affect hash chain
+      // - payload_hash MUST be calculated BEFORE encryption
+      // - payload_hash MUST NEVER be derived from encrypted_message or iv
+      final payloadHash = _calculatePayloadHash(messageText);
+      
+      // REGRESSION LOG: Log payload_hash at insert time for verification debugging
+      print('🔍 INSERT: Calculating payload_hash for new message');
+      print('   Plaintext length: ${messageText.length} chars');
+      print('   Payload hash: ${safeSubstring(payloadHash, 16)}...');
+      print('   Note: payload_hash is from plaintext ONLY (encryption-independent)');
+
+      // SECURITY: Encrypt message_text AFTER payload_hash calculation
+      // This ensures payload_hash is calculated from plaintext (for hash chain integrity)
+      // while message_text is stored encrypted in SQLite
+      String? encryptedMessage;
+      String? iv;
+      
+      try {
+        final encryptedPayload = await AESCryptoService.encrypt(messageText);
+        encryptedMessage = encryptedPayload.cipherText;
+        iv = encryptedPayload.iv;
+        print('🔒 Message encrypted successfully (ciphertext length: ${encryptedMessage.length})');
+      } catch (e) {
+        print('⚠️ Encryption failed: $e - Storing message as plaintext (legacy mode)');
+        // If encryption fails, store as plaintext for backward compatibility
+        // This ensures messages are not lost if encryption service has issues
+        encryptedMessage = null;
+        iv = null;
+      }
+
+      // CRITICAL: Check for duplicate message by payload_hash BEFORE hash chain calculations
+      // This prevents re-inserting the same message when syncing from server
+      // A message with same workspace_id + channel_id + payload_hash is considered duplicate
+      // This check runs AFTER payload_hash calculation but BEFORE current_hash/previous_hash computation
+      // to prevent chain integrity issues from duplicate messages
+      if (channelId != null) {
+        final duplicateCheck = await db.query(
+          'messages',
+          columns: ['message_id'],
+          where: 'workspace_id = ? AND channel_id = ? AND payload_hash = ?',
+          whereArgs: [workspaceId, channelId, payloadHash],
+          limit: 1,
+        );
+        
+        if (duplicateCheck.isNotEmpty) {
+          final existingMessageId = duplicateCheck.first['message_id'] as String;
+          print('⚠️ Message with same payload_hash already exists in SQLite, skipping duplicate');
+          print('   Existing message_id: $existingMessageId');
+          print('   Payload hash: ${safeSubstring(payloadHash, 10)}...');
+          print('   Workspace: $workspaceId, Channel: $channelId');
+          print('   ➡️ Returning existing message_id (idempotent behavior)');
+          // Return existing message_id without modifying hash chain
+          // This ensures chain integrity is preserved during offline → online sync
+          return existingMessageId;
+        }
+      } else if (receiverAddress != null) {
+        // For direct messages (no channel_id), check by workspace_id + receiver_address + payload_hash
+        final duplicateCheck = await db.query(
+          'messages',
+          columns: ['message_id'],
+          where: 'workspace_id = ? AND (sender_address = ? OR receiver_address = ?) AND payload_hash = ?',
+          whereArgs: [workspaceId, senderAddress, receiverAddress, payloadHash],
+          limit: 1,
+        );
+        
+        if (duplicateCheck.isNotEmpty) {
+          final existingMessageId = duplicateCheck.first['message_id'] as String;
+          print('⚠️ Direct message with same payload_hash already exists in SQLite, skipping duplicate');
+          print('   Existing message_id: $existingMessageId');
+          print('   Payload hash: ${safeSubstring(payloadHash, 10)}...');
+          print('   ➡️ Returning existing message_id (idempotent behavior)');
+          return existingMessageId;
+        }
+      }
+
+      // NEW MESSAGES USE HASH VERSION 2 (payload_hash-based hashing)
+      const hashVersion = 2;
+
+      // Calculate current hash using hash_version-aware logic
+      // Version 2: Uses payload_hash instead of message_text
+      // 
+      // CRITICAL: Only include fields that are used in hash calculation
+      // DO NOT include: encrypted_message, iv, synced_to_server, message_state, file_id, channel_id
+      // These fields are metadata and should not affect hash chain integrity
       final dataToHash = {
         'message_id': messageId,
         'workspace_id': workspaceId,
         'sender_address': senderAddress,
         'receiver_address': receiverAddress,
-        'message_text': messageText,
+        'payload_hash': payloadHash, // Version 2: Use payload_hash (calculated from plaintext)
         'timestamp': now,
         'previous_hash': previousHash,
       };
-      final currentHash = _calculateHash(dataToHash);
+      
+      // REGRESSION LOG: Log hash calculation inputs
+      print('🔍 INSERT: Calculating current_hash (v$hashVersion)');
+      print('   payload_hash: ${safeSubstring(payloadHash, 16)}...');
+      print('   previous_hash: ${safeSubstring(previousHash, 16)}...');
+      
+      final currentHash = _calculateHash(dataToHash, hashVersion: hashVersion);
+      
+      if (currentHash.isEmpty) {
+        print('❌ [CRYPTO ERROR] current_hash calculation returned empty string');
+        return null;
+      }
+      
+      print('   current_hash: ${safeSubstring(currentHash, 16)}...');
 
       // Determine message state
       // If state provided, use it; otherwise default based on sync status
       final state = messageState ?? 'OFFLINE_LOCAL';
       
-      // Use conflictAlgorithm to handle race conditions gracefully
-      // If message_id already exists (race condition), ignore the insert
-      await db.insert(
-        'messages',
-        {
+      // SECURITY: Store encrypted message (if encryption succeeded) or plaintext (for backward compatibility)
+      // encrypted_message and iv are stored for new encrypted messages
+      // message_text is kept NULL for encrypted messages, but may be populated for legacy messages
+      final messageData = <String, dynamic>{
           'message_id': messageId,
           'workspace_id': workspaceId,
           'channel_id': channelId,
           'sender_address': senderAddress,
           'receiver_address': receiverAddress,
-          'message_text': messageText,
           'file_id': fileId,
           'timestamp': now,
           'previous_hash': previousHash,
           'current_hash': currentHash,
+        'payload_hash': payloadHash,
+        'hash_version': hashVersion, // NEW: Hash version (2 for new messages)
           'synced_to_server': 0,
           'message_state': state, // CRITICAL: Track message state
-        },
+      };
+      
+      // Store encrypted message if encryption succeeded, otherwise store plaintext (legacy mode)
+      if (encryptedMessage != null && iv != null) {
+        // New encrypted message: store encrypted_message and iv, keep message_text NULL
+        messageData['encrypted_message'] = encryptedMessage;
+        messageData['iv'] = iv;
+        messageData['message_text'] = null; // DO NOT store plaintext for encrypted messages
+      } else {
+        // Legacy mode: store plaintext (encryption failed or not available)
+        messageData['message_text'] = messageText;
+        messageData['encrypted_message'] = null;
+        messageData['iv'] = null;
+      }
+      
+      // CRITICAL: Validate all required fields are present before insert
+      // This ensures message is fully prepared with all crypto operations complete
+      if (hashVersion == 2) {
+        if (payloadHash.isEmpty) {
+          print('❌ [CRYPTO VALIDATION] payload_hash is empty - cannot insert v2 message');
+          return null;
+        }
+        if (encryptedMessage == null || encryptedMessage.isEmpty) {
+          print('❌ [CRYPTO VALIDATION] encrypted_message is missing - cannot insert v2 message');
+          return null;
+        }
+        if (iv == null || iv.isEmpty) {
+          print('❌ [CRYPTO VALIDATION] iv is missing - cannot insert v2 message');
+          return null;
+        }
+        if (currentHash.isEmpty) {
+          print('❌ [CRYPTO VALIDATION] current_hash is empty - cannot insert v2 message');
+          return null;
+        }
+        if (previousHash.isEmpty) {
+          print('⚠️ [CRYPTO VALIDATION] previous_hash is empty - using "0" for genesis');
+          previousHash = '0';
+          messageData['previous_hash'] = '0';
+        }
+      }
+      
+      // Use conflictAlgorithm to handle race conditions gracefully
+      // If message_id already exists (race condition), ignore the insert
+      await db.insert(
+        'messages',
+        messageData,
         conflictAlgorithm: ConflictAlgorithm.ignore, // Ignore if duplicate (race condition)
       );
 
+      // CRITICAL: Verify message was inserted with all required fields
+      // This ensures crypto operations completed successfully
+      final verifyInsert = await db.query(
+        'messages',
+        columns: ['message_id', 'payload_hash', 'encrypted_message', 'iv', 'previous_hash', 'current_hash', 'hash_version'],
+        where: 'message_id = ?',
+        whereArgs: [messageId],
+        limit: 1,
+      );
+      
+      if (verifyInsert.isEmpty) {
+        print('❌ [CRYPTO VALIDATION] Message insert failed - message not found after insert');
+        return null;
+      }
+      
+      final inserted = verifyInsert.first;
+      if (hashVersion == 2) {
+        final insertedPayloadHash = inserted['payload_hash'] as String? ?? '';
+        final insertedEncrypted = inserted['encrypted_message'] as String? ?? '';
+        final insertedIv = inserted['iv'] as String? ?? '';
+        final insertedCurrentHash = inserted['current_hash'] as String? ?? '';
+        
+        if (insertedPayloadHash.isEmpty || insertedEncrypted.isEmpty || 
+            insertedIv.isEmpty || insertedCurrentHash.isEmpty) {
+          print('❌ [CRYPTO VALIDATION] Message inserted but required fields are missing');
+          print('   payload_hash: ${insertedPayloadHash.isNotEmpty}');
+          print('   encrypted_message: ${insertedEncrypted.isNotEmpty}');
+          print('   iv: ${insertedIv.isNotEmpty}');
+          print('   current_hash: ${insertedCurrentHash.isNotEmpty}');
+          return null;
+        }
+      }
+      
       print('✅ Message added to SQLite: $messageId');
+      print('   ✅ All crypto operations completed successfully');
+      print('   ✅ Payload hash: ${safeSubstring(payloadHash, 16)}...');
+      print('   ✅ Previous hash: ${safeSubstring(previousHash, 16)}... (${previousHash == '0' ? 'GENESIS' : 'CHAIN'})');
+      print('   ✅ Current hash: ${safeSubstring(currentHash, 16)}...');
+      print('   ✅ Encrypted: ${encryptedMessage != null && iv != null}');
       return messageId;
     } catch (e) {
       print('❌ Add message error: $e');
@@ -733,9 +1060,10 @@ class SQLiteService {
     }
   }
 
-  /// Get channel messages
+  /// Get channel messages with chain integrity verification
+  /// Returns messages with chain integrity status flag
   /// [sinceTimestamp] - Optional: Only fetch messages after this timestamp (for incremental loading)
-  Future<List<Map<String, dynamic>>> getChannelMessages({
+  Future<Map<String, dynamic>> getChannelMessages({
     required String workspaceId,
     required String channelId,
     int? sinceTimestamp, // Only fetch messages after this timestamp (milliseconds)
@@ -766,10 +1094,50 @@ class SQLiteService {
 
       print('📦 SQLite query: workspace=$workspaceId, channel=$channelId (normalized=$normalizedChannelId), found ${messages.length} messages');
 
-      return messages.map((m) => {
+      // CRITICAL: Verify chain integrity before returning messages
+      // This detects: previous_hash mismatch, missing parent, fork, hash mismatch
+      final chainVerification = await verifyChannelChainIntegrity(
+        workspaceId: workspaceId,
+        channelId: channelId,
+      );
+
+      // SECURITY: Decrypt messages before sending to UI
+      // Transform messages to UI format with decryption
+      final transformedMessages = <Map<String, dynamic>>[];
+      
+      for (final m in messages) {
+        String? messageText;
+        
+        // Check if message is encrypted (has encrypted_message and iv)
+        final encryptedMessage = m['encrypted_message'] as String?;
+        final iv = m['iv'] as String?;
+        
+        if (encryptedMessage != null && encryptedMessage.isNotEmpty && 
+            iv != null && iv.isNotEmpty) {
+          // Encrypted message: decrypt before sending to UI
+          try {
+            messageText = await AESCryptoService.decrypt(
+              cipherText: encryptedMessage,
+              iv: iv,
+            );
+            print('🔓 Message decrypted successfully (message_id: ${m['message_id']})');
+          } catch (e) {
+            print('❌ Decryption error for message ${m['message_id']}: $e');
+            // If decryption fails, use fallback (empty string or legacy message_text)
+            // This ensures UI doesn't break if decryption fails
+            messageText = m['message_text'] as String? ?? '';
+            print('⚠️ Using fallback message_text for failed decryption');
+          }
+        } else {
+          // Legacy message: use plaintext message_text (backward compatibility)
+          messageText = m['message_text'] as String? ?? '';
+        }
+        
+        // Build transformed message with decrypted text
+        transformedMessages.add({
         'message_id': m['message_id'],
-        'messageText': m['message_text'],
-        'message_text': m['message_text'],
+          'messageText': messageText,
+          'message_text': messageText,
         'sender_address': m['sender_address'],
         'senderAddress': m['sender_address'],
         'receiver_address': m['receiver_address'],
@@ -781,12 +1149,31 @@ class SQLiteService {
         'file_id': m['file_id'],
         'fileId': m['file_id'],
         'timestamp': m['timestamp'],
-        'content': m['message_text'], // Add content field for UI compatibility
+          'content': messageText, // Add content field for UI compatibility (decrypted)
         'message_state': m['message_state'], // PHASE 4: Include message state for UI indicators
-      }).toList();
+        });
+      }
+
+      // Return messages with chain integrity status
+      return {
+        'messages': transformedMessages,
+        'chainIntegrity': chainVerification.isValid,
+        'chainIntegrityFailed': chainVerification.isChainIntegrityFailed,
+        'chainFailureReason': chainVerification.failureReason,
+        'chainBrokenAt': chainVerification.brokenAt,
+        'chainFailureDetails': chainVerification.details,
+      };
     } catch (e) {
       print('❌ Get channel messages error: $e');
-      return [];
+      // Return empty messages with chain integrity failure flag
+      return {
+        'messages': <Map<String, dynamic>>[],
+        'chainIntegrity': false,
+        'chainIntegrityFailed': true,
+        'chainFailureReason': 'query_error',
+        'chainBrokenAt': 'unknown',
+        'chainFailureDetails': {'error': e.toString()},
+      };
     }
   }
 
@@ -1107,8 +1494,10 @@ class SQLiteService {
 
   // ============ CHAIN VERIFICATION ============
 
-  /// Verify chain integrity
-  Future<bool> verifyChainIntegrity(String tableName) async {
+  /// Verify chain integrity with detailed error reporting
+  /// Returns ChainVerificationResult instead of throwing exceptions
+  /// Detects: previous_hash mismatch, missing parent, fork (multiple messages with same previous_hash), hash mismatch
+  Future<ChainVerificationResult> verifyChainIntegrity(String tableName) async {
     try {
       final db = await database;
       final records = await db.query(
@@ -1116,37 +1505,440 @@ class SQLiteService {
         orderBy: 'timestamp ASC',
       );
 
-      if (records.isEmpty) return true;
+      if (records.isEmpty) {
+        return ChainVerificationResult.success();
+      }
 
-      String previousHash = '0';
+      // Build hash map for parent lookup (current_hash -> message_id)
+      final hashToMessageId = <String, String>{};
+      final previousHashCounts = <String, int>{};
+      
       for (final record in records) {
+        final messageId = record['message_id'] as String? ?? 
+                         record['workspace_id'] as String? ?? 
+                         'unknown';
+        final currentHash = record['current_hash'] as String?;
+        final previousHash = record['previous_hash'] as String?;
+        
+        // Track current_hash -> message_id mapping (for parent lookup)
+        if (currentHash != null && currentHash.isNotEmpty) {
+          // Check for duplicate current_hash (shouldn't happen, but detect it)
+          if (hashToMessageId.containsKey(currentHash)) {
+            final existingMessageId = hashToMessageId[currentHash];
+            return ChainVerificationResult.failure(
+              reason: 'duplicate_current_hash',
+              brokenAt: messageId,
+              details: {
+                'message_id': messageId,
+                'duplicate_hash': currentHash,
+                'existing_message_id': existingMessageId,
+                'message': 'Multiple messages have the same current_hash - chain integrity compromised',
+              },
+            );
+          }
+          hashToMessageId[currentHash] = messageId;
+        }
+        
+        // Track previous_hash counts (for fork detection)
+        if (previousHash != null && previousHash.isNotEmpty) {
+          previousHashCounts[previousHash] = (previousHashCounts[previousHash] ?? 0) + 1;
+        }
+      }
+
+      // Check for forks: multiple messages pointing to same previous_hash
+      for (final entry in previousHashCounts.entries) {
+        if (entry.value > 1 && entry.key != '0') {
+          // Find all messages with this previous_hash
+          final forkMessages = records.where((r) => 
+            (r['previous_hash'] as String?) == entry.key
+          ).map((r) => (r['message_id'] as String?) ?? (r['workspace_id'] as String?) ?? 'unknown').toList();
+          
+          return ChainVerificationResult.failure(
+            reason: 'fork_detected',
+            brokenAt: forkMessages.isNotEmpty ? forkMessages.first : 'unknown',
+            details: {
+              'previous_hash': entry.key,
+              'fork_count': entry.value,
+              'fork_message_ids': forkMessages,
+              'message': 'Multiple messages point to the same previous_hash - chain fork detected',
+            },
+          );
+        }
+      }
+
+      // Verify chain links: previous_hash -> current_hash
+      String expectedPreviousHash = '0';
+      for (int i = 0; i < records.length; i++) {
+        final record = records[i];
+        final messageId = record['message_id'] as String? ?? 
+                         record['workspace_id'] as String? ?? 
+                         'unknown';
         final currentHash = record['current_hash'] as String?;
         final recordPreviousHash = record['previous_hash'] as String?;
 
-        // Verify previous hash matches
-        if (recordPreviousHash != previousHash) {
-          print('❌ Chain broken at ${record['workspace_id'] ?? record['message_id']}');
-          return false;
+        // Check 1: Verify previous hash matches expected
+        if (recordPreviousHash != expectedPreviousHash) {
+          return ChainVerificationResult.failure(
+            reason: 'previous_hash_mismatch',
+            brokenAt: messageId,
+            details: {
+              'message_id': messageId,
+              'index': i + 1,
+              'expected_previous_hash': expectedPreviousHash,
+              'found_previous_hash': recordPreviousHash ?? 'null',
+              'message': 'Previous hash does not match expected chain state',
+            },
+          );
         }
 
-        // Verify current hash
-        final dataToHash = Map<String, dynamic>.from(record);
-        dataToHash.remove('current_hash');
-        final calculatedHash = _calculateHash(dataToHash);
-
-        if (currentHash != calculatedHash) {
-          print('❌ Hash mismatch at ${record['workspace_id'] ?? record['message_id']}');
-          return false;
+        // Check 2: Verify parent message exists (unless this is genesis with previous_hash='0')
+        if (expectedPreviousHash != '0' && !hashToMessageId.containsKey(expectedPreviousHash)) {
+          return ChainVerificationResult.failure(
+            reason: 'missing_parent',
+            brokenAt: messageId,
+            details: {
+              'message_id': messageId,
+              'index': i + 1,
+              'missing_previous_hash': expectedPreviousHash,
+              'message': 'Parent message with current_hash matching previous_hash not found',
+            },
+          );
         }
 
-        previousHash = currentHash!;
+        // Check 3: Verify current hash calculation
+        if (currentHash != null && currentHash.isNotEmpty) {
+          final hashVersion = record['hash_version'] as int? ?? 2;
+          
+          // CRITICAL: Reconstruct hash using ONLY the fields used during insert
+          // DO NOT include: encrypted_message, iv, synced_to_server, message_state, file_id, channel_id
+          // For hash_version 2: Use stored payload_hash (calculated from plaintext at insert time)
+          // For hash_version 1: Use message_text (legacy)
+          final storedPayloadHash = record['payload_hash'] as String?;
+          final storedMessageText = record['message_text'] as String?;
+          
+          // Build dataForHash with EXACT same structure as insert
+          final dataForHash = {
+            'message_id': record['message_id'],
+            'workspace_id': record['workspace_id'],
+            'sender_address': record['sender_address'],
+            'receiver_address': record['receiver_address'],
+            'timestamp': record['timestamp'],
+            'previous_hash': expectedPreviousHash,
+          };
+          
+          // Add payload_hash or message_text based on hash version
+          // CRITICAL: payload_hash is derived from plaintext ONLY (encryption-independent)
+          if (hashVersion == 2) {
+            // Version 2: Use stored payload_hash (calculated from plaintext before encryption)
+            if (storedPayloadHash == null || storedPayloadHash.isEmpty) {
+              // Fallback: try to calculate from message_text if available (legacy migration)
+              if (storedMessageText != null && storedMessageText.isNotEmpty) {
+                final fallbackPayloadHash = _calculatePayloadHash(storedMessageText);
+                dataForHash['payload_hash'] = fallbackPayloadHash;
+              } else {
+                // Cannot verify without payload_hash
+                return ChainVerificationResult.failure(
+                  reason: 'hash_mismatch',
+                  brokenAt: messageId,
+                  details: {
+                    'message_id': messageId,
+                    'index': i + 1,
+                    'error': 'hash_version 2 requires payload_hash but it is missing',
+                    'hash_version': hashVersion,
+                  },
+                );
+              }
+            } else {
+              // Use stored payload_hash (this is what was used during insert)
+              dataForHash['payload_hash'] = storedPayloadHash;
+            }
+          } else {
+            // Version 1: Use message_text (legacy plaintext hashing)
+            dataForHash['message_text'] = storedMessageText ?? '';
+          }
+          
+          final calculatedHash = _calculateHash(dataForHash, hashVersion: hashVersion);
+
+          if (currentHash != calculatedHash) {
+            return ChainVerificationResult.failure(
+              reason: 'hash_mismatch',
+              brokenAt: messageId,
+              details: {
+                'message_id': messageId,
+                'index': i + 1,
+                'expected_current_hash': calculatedHash,
+                'found_current_hash': currentHash,
+                'hash_version': hashVersion,
+                'payload_hash_used': hashVersion == 2 ? storedPayloadHash : null,
+                'message_text_used': hashVersion == 1 ? storedMessageText : null,
+                'message': 'Current hash does not match calculated hash - data may have been modified',
+              },
+            );
+          }
+        }
+
+        // Update expected previous hash for next iteration
+        if (currentHash != null && currentHash.isNotEmpty) {
+          expectedPreviousHash = currentHash;
+        } else {
+          // If current_hash is null/empty, chain is broken
+          return ChainVerificationResult.failure(
+            reason: 'missing_current_hash',
+            brokenAt: messageId,
+            details: {
+              'message_id': messageId,
+              'index': i + 1,
+              'message': 'Message missing current_hash - chain integrity compromised',
+            },
+          );
+        }
       }
 
       print('✅ Chain integrity verified for $tableName');
-      return true;
+      return ChainVerificationResult.success();
     } catch (e) {
       print('❌ Verify chain integrity error: $e');
-      return false;
+      // Return failure result instead of throwing
+      return ChainVerificationResult.failure(
+        reason: 'verification_error',
+        brokenAt: 'unknown',
+        details: {
+          'error': e.toString(),
+          'message': 'Chain verification failed due to exception',
+        },
+      );
+    }
+  }
+
+  /// Verify chain integrity for channel messages
+  /// Returns ChainVerificationResult with detailed failure information
+  Future<ChainVerificationResult> verifyChannelChainIntegrity({
+    required String workspaceId,
+    required String channelId,
+  }) async {
+    try {
+      final db = await database;
+      final messages = await db.query(
+        'messages',
+        where: 'workspace_id = ? AND channel_id = ?',
+        whereArgs: [workspaceId, channelId],
+        orderBy: 'timestamp ASC',
+      );
+
+      if (messages.isEmpty) {
+        return ChainVerificationResult.success();
+      }
+
+      // Build hash map for parent lookup
+      final hashToMessageId = <String, String>{};
+      final previousHashCounts = <String, int>{};
+      
+      for (final msg in messages) {
+        final messageId = msg['message_id'] as String? ?? 'unknown';
+        final currentHash = msg['current_hash'] as String?;
+        final previousHash = msg['previous_hash'] as String?;
+        
+        if (currentHash != null && currentHash.isNotEmpty) {
+          if (hashToMessageId.containsKey(currentHash)) {
+            final existingMessageId = hashToMessageId[currentHash];
+            return ChainVerificationResult.failure(
+              reason: 'duplicate_current_hash',
+              brokenAt: messageId,
+              details: {
+                'workspace_id': workspaceId,
+                'channel_id': channelId,
+                'message_id': messageId,
+                'duplicate_hash': currentHash,
+                'existing_message_id': existingMessageId,
+              },
+            );
+          }
+          hashToMessageId[currentHash] = messageId;
+        }
+        
+        if (previousHash != null && previousHash.isNotEmpty) {
+          previousHashCounts[previousHash] = (previousHashCounts[previousHash] ?? 0) + 1;
+        }
+      }
+
+      // Check for forks
+      for (final entry in previousHashCounts.entries) {
+        if (entry.value > 1 && entry.key != '0') {
+          final forkMessages = messages.where((m) => 
+            (m['previous_hash'] as String?) == entry.key
+          ).map((m) => m['message_id'] as String? ?? 'unknown').toList();
+          
+          return ChainVerificationResult.failure(
+            reason: 'fork_detected',
+            brokenAt: forkMessages.isNotEmpty ? forkMessages.first : 'unknown',
+            details: {
+              'workspace_id': workspaceId,
+              'channel_id': channelId,
+              'previous_hash': entry.key,
+              'fork_count': entry.value,
+              'fork_message_ids': forkMessages,
+            },
+          );
+        }
+      }
+
+      // Verify chain links
+      String expectedPreviousHash = '0';
+      for (int i = 0; i < messages.length; i++) {
+        final msg = messages[i];
+        final messageId = msg['message_id'] as String? ?? 'unknown';
+        final currentHash = msg['current_hash'] as String?;
+        final recordPreviousHash = msg['previous_hash'] as String?;
+
+        if (recordPreviousHash != expectedPreviousHash) {
+          return ChainVerificationResult.failure(
+            reason: 'previous_hash_mismatch',
+            brokenAt: messageId,
+            details: {
+              'workspace_id': workspaceId,
+              'channel_id': channelId,
+              'message_id': messageId,
+              'index': i + 1,
+              'expected_previous_hash': expectedPreviousHash,
+              'found_previous_hash': recordPreviousHash ?? 'null',
+            },
+          );
+        }
+
+        if (expectedPreviousHash != '0' && !hashToMessageId.containsKey(expectedPreviousHash)) {
+          return ChainVerificationResult.failure(
+            reason: 'missing_parent',
+            brokenAt: messageId,
+            details: {
+              'workspace_id': workspaceId,
+              'channel_id': channelId,
+              'message_id': messageId,
+              'index': i + 1,
+              'missing_previous_hash': expectedPreviousHash,
+            },
+          );
+        }
+
+        if (currentHash != null && currentHash.isNotEmpty) {
+          final hashVersion = msg['hash_version'] as int? ?? 2;
+          
+          // CRITICAL: Reconstruct hash using ONLY the fields used during insert
+          // This ensures verification matches the original hash calculation
+          // DO NOT include: encrypted_message, iv, synced_to_server, message_state, file_id, channel_id
+          // For hash_version 2: Use stored payload_hash (calculated from plaintext at insert time)
+          // For hash_version 1: Use message_text (legacy)
+          final storedPayloadHash = msg['payload_hash'] as String?;
+          final storedMessageText = msg['message_text'] as String?;
+          
+          // Build dataForHash with EXACT same structure as insert (line 901-910)
+          final dataForHash = {
+            'message_id': msg['message_id'],
+            'workspace_id': msg['workspace_id'],
+            'sender_address': msg['sender_address'],
+            'receiver_address': msg['receiver_address'],
+            'timestamp': msg['timestamp'],
+            'previous_hash': expectedPreviousHash,
+          };
+          
+          // Add payload_hash or message_text based on hash version
+          // CRITICAL: payload_hash is derived from plaintext ONLY (encryption-independent)
+          // payload_hash was calculated BEFORE encryption during insert, so we use stored value
+          if (hashVersion == 2) {
+            // Version 2: Use stored payload_hash (calculated from plaintext before encryption)
+            if (storedPayloadHash == null || storedPayloadHash.isEmpty) {
+              // This should never happen, but log it for debugging
+              print('⚠️ WARNING: hash_version 2 but payload_hash is missing for message $messageId');
+              // Fallback: try to calculate from message_text if available (legacy migration)
+              if (storedMessageText != null && storedMessageText.isNotEmpty) {
+                final fallbackPayloadHash = _calculatePayloadHash(storedMessageText);
+                dataForHash['payload_hash'] = fallbackPayloadHash;
+                print('   Used fallback: calculated payload_hash from message_text');
+              } else {
+                // Cannot verify without payload_hash - treat as integrity failure
+                return ChainVerificationResult.failure(
+                  reason: 'hash_mismatch',
+                  brokenAt: messageId,
+                  details: {
+                    'workspace_id': workspaceId,
+                    'channel_id': channelId,
+                    'message_id': messageId,
+                    'index': i + 1,
+                    'error': 'hash_version 2 requires payload_hash but it is missing',
+                    'hash_version': hashVersion,
+                  },
+                );
+              }
+            } else {
+              // Use stored payload_hash (this is what was used during insert)
+              dataForHash['payload_hash'] = storedPayloadHash;
+            }
+          } else {
+            // Version 1: Use message_text (legacy plaintext hashing)
+            dataForHash['message_text'] = storedMessageText ?? '';
+          }
+          
+          // REGRESSION LOG: Log hash calculation inputs for debugging
+          print('🔍 VERIFY: Recalculating hash for message $messageId (v$hashVersion)');
+          if (hashVersion == 2) {
+            print('   Using stored payload_hash: ${safeSubstring(storedPayloadHash, 16)}...');
+          } else {
+            final msgText = storedMessageText ?? '';
+            final previewLength = msgText.length < 20 ? msgText.length : 20;
+            print('   Using message_text: ${msgText.substring(0, previewLength)}...');
+          }
+          print('   previous_hash: ${safeSubstring(expectedPreviousHash, 16)}...');
+          
+          final calculatedHash = _calculateHash(dataForHash, hashVersion: hashVersion);
+          
+          print('   Calculated hash: ${safeSubstring(calculatedHash, 16)}...');
+          print('   Stored hash: ${safeSubstring(currentHash, 16)}...');
+          print('   Match: ${calculatedHash == currentHash ? '✅' : '❌'}');
+
+          if (currentHash != calculatedHash) {
+            return ChainVerificationResult.failure(
+              reason: 'hash_mismatch',
+              brokenAt: messageId,
+              details: {
+                'workspace_id': workspaceId,
+                'channel_id': channelId,
+                'message_id': messageId,
+                'index': i + 1,
+                'expected_current_hash': calculatedHash,
+                'found_current_hash': currentHash,
+                'hash_version': hashVersion,
+                'payload_hash_used': hashVersion == 2 ? storedPayloadHash : null,
+                'message_text_used': hashVersion == 1 ? storedMessageText : null,
+              },
+            );
+          }
+          
+          expectedPreviousHash = currentHash;
+        } else {
+          return ChainVerificationResult.failure(
+            reason: 'missing_current_hash',
+            brokenAt: messageId,
+            details: {
+              'workspace_id': workspaceId,
+              'channel_id': channelId,
+              'message_id': messageId,
+              'index': i + 1,
+            },
+          );
+        }
+      }
+
+      return ChainVerificationResult.success();
+    } catch (e) {
+      print('❌ Verify channel chain integrity error: $e');
+      return ChainVerificationResult.failure(
+        reason: 'verification_error',
+        brokenAt: 'unknown',
+        details: {
+          'workspace_id': workspaceId,
+          'channel_id': channelId,
+          'error': e.toString(),
+        },
+      );
     }
   }
 
@@ -1262,8 +2054,9 @@ class SQLiteService {
         final displayName = channelName ?? channelId;
         if (displayName != null && displayName.isNotEmpty) {
           // Capitalize first letter for display
-          final capitalized = displayName.substring(0, 1).toUpperCase() + 
-                             (displayName.length > 1 ? displayName.substring(1) : '');
+          final capitalized = displayName.isNotEmpty 
+              ? (safeSubstring(displayName, 1).toUpperCase() + (displayName.length > 1 ? displayName.substring(1) : ''))
+              : displayName;
           channelSet.add(capitalized);
         }
       }
@@ -1282,8 +2075,9 @@ class SQLiteService {
           }
           
           // Capitalize first letter
-          final capitalized = channelId.substring(0, 1).toUpperCase() + 
-                             (channelId.length > 1 ? channelId.substring(1) : '');
+          final capitalized = channelId.isNotEmpty
+              ? (safeSubstring(channelId, 1).toUpperCase() + (channelId.length > 1 ? channelId.substring(1) : ''))
+              : channelId;
           channelSet.add(capitalized);
         }
       }
@@ -1535,7 +2329,7 @@ class SQLiteService {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
       
-      print('✅ Chain state saved: workspace=$workspaceId, channel=$channelId, hash=${lastServerHash.substring(0, 10)}...');
+      print('✅ Chain state saved: workspace=$workspaceId, channel=$channelId, hash=${safeSubstring(lastServerHash, 10)}...');
       return true;
     } catch (e) {
       print('❌ Save chain state error: $e');
@@ -1560,7 +2354,7 @@ class SQLiteService {
       
       if (result.isNotEmpty) {
         final hash = result.first['last_server_hash'] as String?;
-        print('✅ Retrieved chain state: workspace=$workspaceId, channel=$channelId, hash=${hash?.substring(0, 10)}...');
+        print('✅ Retrieved chain state: workspace=$workspaceId, channel=$channelId, hash=${safeSubstring(hash, 10)}...');
         return hash;
       }
       
@@ -1634,10 +2428,59 @@ class SQLiteService {
         DateTime.now().microsecondsSinceEpoch.toString();
   }
 
-  /// Calculate SHA-256 hash
-  String _calculateHash(Map<String, dynamic> data) {
-    final jsonString = jsonEncode(data);
+  /// Calculate SHA-256 hash with hash version support
+  /// Version 1: Uses message_text in hash calculation (legacy)
+  /// Version 2: Uses payload_hash in hash calculation (new)
+  /// 
+  /// CRITICAL SECURITY RULE:
+  /// - payload_hash MUST be derived from plaintext ONLY (encryption-independent)
+  /// - payload_hash is calculated BEFORE encryption during insert
+  /// - payload_hash MUST NEVER be derived from encrypted_message or iv
+  /// - This function uses the stored payload_hash value (already calculated from plaintext)
+  String _calculateHash(Map<String, dynamic> data, {int hashVersion = 1}) {
+    // Create a copy of data for modification
+    final dataToHash = Map<String, dynamic>.from(data);
+    
+    // For hash version 2, replace message_text with payload_hash
+    if (hashVersion == 2) {
+      final payloadHash = dataToHash['payload_hash'] as String?;
+      if (payloadHash != null && payloadHash.isNotEmpty) {
+        // Remove message_text and use payload_hash instead
+        // payload_hash is already in the map (calculated from plaintext at insert time)
+        dataToHash.remove('message_text');
+        // NOTE: payload_hash is encryption-independent (calculated before encryption)
+      } else {
+        // Fallback: if payload_hash not available (legacy migration), calculate it from message_text
+        // This should only happen for legacy messages being migrated
+        final messageText = dataToHash['message_text'] as String? ?? '';
+        if (messageText.isNotEmpty) {
+          // CRITICAL: Calculate payload_hash from plaintext (if message_text is still available)
+          final calculatedPayloadHash = _calculatePayloadHash(messageText);
+          dataToHash.remove('message_text');
+          dataToHash['payload_hash'] = calculatedPayloadHash;
+        }
+      }
+    }
+    // For hash version 1, keep message_text (default behavior)
+    
+    final jsonString = jsonEncode(dataToHash);
     final bytes = utf8.encode(jsonString);
+    final digest = sha256.convert(bytes);
+    return digest.toString();
+  }
+
+  /// Calculate payload hash (SHA-256 of message_text)
+  /// Used for payload-based hashing transition
+  /// Returns stable hash that remains constant across sync operations
+  /// 
+  /// CRITICAL SECURITY RULE:
+  /// - payload_hash MUST be calculated from PLAINTEXT messageText ONLY
+  /// - payload_hash MUST be calculated BEFORE encryption
+  /// - payload_hash MUST NEVER be derived from encrypted_message or iv
+  /// - Encryption randomness (AES-CBC IV) must NOT affect hash chain
+  /// - This ensures hash chain integrity is independent of encryption
+  String _calculatePayloadHash(String messageText) {
+    final bytes = utf8.encode(messageText);
     final digest = sha256.convert(bytes);
     return digest.toString();
   }

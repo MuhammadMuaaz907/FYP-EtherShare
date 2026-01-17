@@ -1,10 +1,22 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { getCollection } = require('../utils/db');
 const { validateMessage } = require('../middleware/validation');
 const { optionalAuth } = require('../middleware/auth');
 const HashChain = require('../utils/hashChain');
 const GasCalculator = require('../utils/gasCalculator');
+
+/**
+ * Calculate payload hash (SHA-256 of message_text)
+ * Used for payload-based hashing transition
+ * Returns stable hash that remains constant across sync operations
+ * @param {String} messageText - The message text to hash
+ * @returns {String} SHA-256 hash hex string
+ */
+function calculatePayloadHash(messageText) {
+  return crypto.createHash('sha256').update(messageText, 'utf8').digest('hex');
+}
 
 /**
  * @route   POST /api/messages
@@ -21,12 +33,18 @@ router.post('/', validateMessage, async (req, res) => {
       channelId,
       senderAddress,
       receiverAddress,
-      messageText,
+      messageText, // DEPRECATED: Plaintext message_text (only for backward compatibility)
+      encryptedMessage, // NEW: AES-256-CBC encrypted message (base64)
+      iv, // NEW: Initialization vector for encryption (base64)
       fileId,
       messageId: providedMessageId, // CRITICAL: Accept message_id from client for idempotency
       previousHash: providedPreviousHash, // CRITICAL: Accept previous_hash from client for sync
       currentHash: providedCurrentHash, // CRITICAL: Accept current_hash from client for sync
+      payloadHash: providedPayloadHash, // CRITICAL: Accept payload_hash from client (calculated from plaintext on client)
     } = req.body;
+    
+    // CRITICAL: Flag for offline sync (allows hash re-anchoring)
+    const isOfflineSync = req.body.isOfflineSync === true;
     
     const timestamp = Date.now();
     
@@ -77,12 +95,139 @@ router.post('/', validateMessage, async (req, res) => {
       messageId = `msg_${timestamp}_${senderAddress.toLowerCase()}`;
     }
     
+    // ========================================================================
+    // SECURITY ENFORCEMENT: PLAINTEXT MESSAGE DEPRECATION
+    // ========================================================================
+    // PHASED SECURITY MIGRATION POLICY:
+    // - Phase 1 (COMPLETE): Introduced encrypted_message + iv support
+    // - Phase 2 (CURRENT): ENFORCE encryption - reject all plaintext for new messages
+    // - Phase 3 (FUTURE): Migrate/archive legacy plaintext messages
+    //
+    // ZERO-KNOWLEDGE ENFORCEMENT:
+    // - Server MUST NOT receive plaintext message_text for new messages
+    // - All new messages MUST use encrypted_message + iv + payload_hash
+    // - This ensures server cannot read message content (zero-knowledge architecture)
+    //
+    // LEGACY READ-ONLY POLICY:
+    // - Existing plaintext messages remain in database (backward compatibility)
+    // - Legacy messages are READ-ONLY (no edits, re-sends, or re-indexing allowed)
+    // - This allows gradual migration without breaking existing data
+    // ========================================================================
+    
+    const hasEncryptedFields = encryptedMessage && encryptedMessage.trim().length > 0 && 
+                               iv && iv.trim().length > 0;
+    const hasPlaintext = messageText && messageText.trim().length > 0;
+    const hasPayloadHash = providedPayloadHash && providedPayloadHash.trim().length > 0;
+    
+    // SECURITY ENFORCEMENT: Reject ALL plaintext messages for new submissions
+    // This enforces zero-knowledge architecture - server must never receive plaintext
+    if (hasPlaintext) {
+      // SECURITY WARNING: Attempt to submit plaintext message (deprecated and blocked)
+      console.warn(`🚨 SECURITY WARNING: Plaintext message submission attempt blocked`);
+      console.warn(`   Message ID: ${providedMessageId || 'pending'}`);
+      console.warn(`   Sender: ${senderAddress}`);
+      console.warn(`   Workspace: ${workspaceId}, Channel: ${channelId || 'DM'}`);
+      console.warn(`   Reason: Plaintext messages are deprecated for security (zero-knowledge enforcement)`);
+      
+      return res.status(400).json({
+        success: false,
+        error: 'Plaintext messages are deprecated',
+        message: 'All new messages must be encrypted. Plaintext message_text is no longer accepted for security reasons (zero-knowledge architecture). Use encrypted_message + iv + payload_hash instead.',
+        security_notice: 'Server enforces zero-knowledge - it cannot read plaintext messages. Encryption must be performed client-side before submission.',
+        required_fields: {
+          encrypted_message: 'Base64-encoded AES-256-CBC encrypted message',
+          iv: 'Base64-encoded initialization vector',
+          payload_hash: 'SHA-256 hash of plaintext (calculated before encryption)',
+          hash_version: 2
+        },
+        deprecated: 'message_text field is deprecated and rejected for new messages'
+      });
+    }
+    
+    // SECURITY: Require encrypted fields for all new messages
+    if (!hasEncryptedFields) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing encrypted message fields',
+        message: 'encrypted_message and iv are required for all new messages (plaintext is deprecated)',
+        required_fields: {
+          encrypted_message: 'Base64-encoded AES-256-CBC encrypted message',
+          iv: 'Base64-encoded initialization vector',
+          payload_hash: 'SHA-256 hash of plaintext (calculated before encryption)',
+          hash_version: 2
+        }
+      });
+    }
+    
+    // SECURITY: Require payload_hash for encrypted messages (cannot calculate without plaintext)
+    if (!hasPayloadHash || hasPayloadHash.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing payload_hash',
+        message: 'payload_hash is required for encrypted messages (calculated from plaintext on client before encryption)',
+        security_note: 'payload_hash ensures hash chain integrity - it must be calculated from plaintext before encryption'
+      });
+    }
+    
+    // SECURITY: All new messages MUST use hash_version 2 (encrypted messages)
+    // Legacy hash_version 1 (plaintext) is deprecated and rejected
+    // Note: hash_version from request is ignored - we enforce v2 for all new messages
+    
+    // Use provided payload_hash (must be calculated from plaintext on client)
+    // Server cannot calculate payload_hash because it never receives plaintext (zero-knowledge)
+    const payloadHash = providedPayloadHash;
+    
+    // Validate payload_hash format (SHA-256 produces 64-character hex string)
+    if (!/^[a-f0-9]{64}$/i.test(payloadHash)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid payload_hash format',
+        message: 'payload_hash must be a valid SHA-256 hash (64-character hexadecimal string)'
+      });
+    }
+    
+    // SECURITY: All new messages MUST use hash_version 2 (encrypted messages)
+    // Legacy hash_version 1 (plaintext) is deprecated and rejected
+    const enforcedHashVersion = 2; // Enforced for all new messages
+    
+    // ========================================================================
+    // SECURITY: BUILD MESSAGE DATA FOR HASH CALCULATION AND STORAGE
+    // ========================================================================
+    // HASH CALCULATION:
+    // - hash_version 2: Uses payload_hash ONLY (no message_text needed)
+    // - Server never receives plaintext, so it cannot calculate payload_hash
+    // - Client must calculate payload_hash from plaintext before encryption
+    //
+    // MONGODB STORAGE:
+    // - encrypted_message: Base64-encoded AES-256-CBC ciphertext
+    // - iv: Base64-encoded initialization vector
+    // - payload_hash: SHA-256 hash of plaintext (for hash chain integrity)
+    // - hash_version: Always 2 for new messages (enforced)
+    // - message_text: NOT stored (zero-knowledge enforcement)
+    // ========================================================================
+    
+    // Build messageData for hash calculation (v2 uses payload_hash only)
+    const messageDataForHash = {
+      message_id: messageId,
+      workspace_id: workspaceId,
+      sender_address: senderAddress.toLowerCase().trim(),
+      timestamp: timestamp,
+      payload_hash: payloadHash, // Used for v2 hash calculation (calculated from plaintext on client)
+      hash_version: enforcedHashVersion, // Always 2 for new messages
+    };
+    // NOTE: message_text is NOT included - we don't have plaintext (zero-knowledge)
+    
+    // Build messageData for MongoDB storage (encrypted only)
     const messageData = {
       message_id: messageId,
       workspace_id: workspaceId,
       sender_address: senderAddress.toLowerCase().trim(),
-      message_text: messageText,
-      timestamp: timestamp
+      timestamp: timestamp,
+      payload_hash: payloadHash, // Always store payload_hash (for hash chain integrity)
+      hash_version: enforcedHashVersion, // Always 2 for new messages (enforced)
+      encrypted_message: encryptedMessage, // Base64-encoded encrypted message (required)
+      iv: iv, // Base64-encoded IV (required)
+      // message_text: NOT stored (zero-knowledge enforcement - server cannot read plaintext)
     };
     
     // Add optional fields
@@ -119,12 +264,13 @@ router.post('/', validateMessage, async (req, res) => {
       // This prevents re-calculating hashes and breaking chain integrity
       console.log(`🔄 Idempotent sync: Using provided hashes for message ${messageId}`);
       messageWithHash = {
-        ...messageData,
+        ...messageData, // messageData already excludes message_text
         previous_hash: providedPreviousHash,
         current_hash: providedCurrentHash,
       };
       
       // CRITICAL: Verify provided hashes match expected chain state
+      // For offline sync, allow re-anchoring if previous_hash doesn't match
       const verifyInfo = await HashChain.getAndVerifyLastHash(
         messagesCollection,
         filter,
@@ -132,17 +278,58 @@ router.post('/', validateMessage, async (req, res) => {
       );
       
       if (!verifyInfo.isValid && verifyInfo.hash !== '0') {
-        // Previous hash doesn't match - this might be a chain break or out-of-order sync
-        console.warn(`⚠️ Provided previous_hash doesn't match chain state for message ${messageId}`);
-        console.warn(`   Expected: ${verifyInfo.hash.substring(0, 10)}..., Provided: ${providedPreviousHash.substring(0, 10)}...`);
-        // Continue anyway - chain integrity check will catch actual tampering
+        if (isOfflineSync) {
+          // OFFLINE SYNC: Previous hash mismatch is expected when offline for extended period
+          // Re-anchor the message to the current server chain
+          console.log(`🔄 [OFFLINE SYNC] Re-anchoring message ${messageId} to server chain`);
+          console.log(`   Expected server hash: ${verifyInfo.hash.substring(0, 10)}...`);
+          console.log(`   Provided offline hash: ${providedPreviousHash.substring(0, 10)}...`);
+          console.log(`   Message was offline, re-calculating hash with server's chain state`);
+          
+          // Re-calculate current_hash using server's last hash as previous_hash
+          // Keep the provided current_hash structure but update previous_hash
+          const reAnchoredPreviousHash = verifyInfo.hash;
+          
+          // Recalculate current_hash with new previous_hash (keeping same data)
+          // Use messageDataForHash for hash calculation (v2 uses payload_hash only, no message_text)
+          const reAnchoredMessageData = {
+            ...messageDataForHash,
+            previous_hash: reAnchoredPreviousHash,
+          };
+          
+          // Recalculate hash with correct previous_hash (using enforced hash_version 2)
+          const reAnchoredCurrentHash = HashChain.calculateHash(
+            reAnchoredMessageData,
+            reAnchoredPreviousHash,
+            enforcedHashVersion // Always 2 for encrypted messages
+          );
+          
+          messageWithHash = {
+            ...messageData,
+            previous_hash: reAnchoredPreviousHash,
+            current_hash: reAnchoredCurrentHash,
+          };
+          
+          console.log(`✅ [OFFLINE SYNC] Re-anchored message ${messageId} with new previous_hash`);
+        } else {
+          // Normal sync: Previous hash doesn't match - this might be a chain break or out-of-order sync
+          console.warn(`⚠️ Provided previous_hash doesn't match chain state for message ${messageId}`);
+          console.warn(`   Expected: ${verifyInfo.hash.substring(0, 10)}..., Provided: ${providedPreviousHash.substring(0, 10)}...`);
+          // Continue anyway - chain integrity check will catch actual tampering
+        }
       }
       
-      // Insert message with provided hashes
+      // Insert message with provided (or re-anchored) hashes
       try {
         await messagesCollection.insertOne(messageWithHash);
         insertSuccess = true;
-        console.log(`✅ Idempotent sync message inserted: ${messageId}`);
+        const syncType = isOfflineSync ? '[OFFLINE SYNC]' : '[IDEMPOTENT SYNC]';
+        console.log(`✅ ${syncType} Message inserted: ${messageId}`);
+        if (isOfflineSync) {
+          console.log(`   Previous hash: ${messageWithHash.previous_hash.substring(0, 10)}...`);
+          console.log(`   Current hash: ${messageWithHash.current_hash.substring(0, 10)}...`);
+          console.log(`   Hash version: ${messageWithHash.hash_version || enforcedHashVersion}`); // Always 2 for encrypted
+        }
       } catch (error) {
         // If duplicate key error, message already exists (race condition)
         if (error.code === 11000 || error.message.includes('E11000')) {
@@ -163,12 +350,20 @@ router.post('/', validateMessage, async (req, res) => {
       while (!insertSuccess && retryAttempts < maxRetries) {
         try {
           // Get hash fields with built-in race condition handling
+          // Use messageDataForHash for hash calculation (v2 uses payload_hash only, no message_text)
           messageWithHash = await HashChain.addHashFields(
             messagesCollection,
-            messageData,
+            messageDataForHash,
             filter,
             retryAttempts
           );
+          
+          // SECURITY: Clean up hash calculation fields before MongoDB insert
+          // For v2: Only payload_hash is used (no message_text - we never receive plaintext)
+          // Remove any message_text field that might have been added during hash calculation
+          const { message_text, ...messageForMongoDB } = messageWithHash;
+          messageWithHash = messageForMongoDB;
+          // ENFORCEMENT: message_text is NEVER stored for new messages (zero-knowledge)
           
           // CRITICAL: Verify hash is still valid right before insert
           const verifyInfo = await HashChain.getAndVerifyLastHash(
@@ -240,17 +435,25 @@ router.post('/', validateMessage, async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Message sent successfully',
-      data: {
-        message_id: messageId,
-        workspace_id: workspaceId,
-        sender_address: senderAddress.toLowerCase().trim(),
-        message_text: messageText,
-        timestamp: timestamp,
-        gas_used: gasUsed,
-        gas_price: gasPrice,
-        transaction_fee: transactionFee,
-        transaction_time_ms: Math.round(executionTimeMs * 100) / 100
-      }
+        data: {
+          message_id: messageId,
+          workspace_id: workspaceId,
+          sender_address: senderAddress.toLowerCase().trim(),
+          // SECURITY: Return encrypted fields (if encrypted) or plaintext (if legacy)
+          // Server is zero-knowledge - does not decrypt, just stores and returns encrypted payload
+          ...(hasEncryptedFields ? {
+            encrypted_message: encryptedMessage,
+            iv: iv,
+          } : {
+            message_text: messageText, // Legacy plaintext (deprecated)
+          }),
+          payload_hash: payloadHash,
+          timestamp: timestamp,
+          gas_used: gasUsed,
+          gas_price: gasPrice,
+          transaction_fee: transactionFee,
+          transaction_time_ms: Math.round(executionTimeMs * 100) / 100
+        }
     });
   } catch (error) {
     // Calculate gas even on error
@@ -277,6 +480,16 @@ router.post('/', validateMessage, async (req, res) => {
  * @route   GET /api/messages/channel
  * @desc    Get channel messages with chain integrity verification
  * @access  Public
+ * 
+ * LEGACY READ-ONLY POLICY:
+ * - Returns encrypted_message + iv for encrypted messages (new format)
+ * - Returns message_text for legacy plaintext messages (backward compatibility)
+ * - Legacy messages are READ-ONLY: server does not allow edits, re-sends, or re-indexing
+ * - This ensures backward compatibility while enforcing encryption for new messages
+ * 
+ * ZERO-KNOWLEDGE:
+ * - Server never decrypts messages (zero-knowledge architecture)
+ * - Returns encrypted payload as-is for client-side decryption
  */
 router.get('/channel', optionalAuth, async (req, res) => {
   try {
@@ -350,8 +563,25 @@ router.get('/channel', optionalAuth, async (req, res) => {
     }
     
     // Clean up response (remove internal hash fields)
+    // SECURITY: Return encrypted_message + iv for encrypted messages
+    // Return legacy message_text only for backward compatibility (deprecated)
+    // Server is zero-knowledge: never decrypts, just stores and returns encrypted payload
     const cleanMessages = messages.map(msg => {
-      const { _id, previous_hash, current_hash, chain_broken, chain_broken_at, createdAt, updatedAt, __v, ...rest } = msg;
+      const { 
+        _id, 
+        previous_hash, 
+        current_hash, 
+        chain_broken, 
+        chain_broken_at, 
+        createdAt, 
+        updatedAt, 
+        __v,
+        ...rest 
+      } = msg;
+      // Return: message_id, workspace_id, channel_id, sender_address, receiver_address,
+      //         encrypted_message (if encrypted), iv (if encrypted),
+      //         message_text (if legacy plaintext - deprecated),
+      //         payload_hash, hash_version, timestamp, file_id
       return rest;
     });
     
@@ -380,6 +610,16 @@ router.get('/channel', optionalAuth, async (req, res) => {
  * @route   GET /api/messages/direct
  * @desc    Get direct messages between two users with chain integrity verification
  * @access  Public
+ * 
+ * LEGACY READ-ONLY POLICY:
+ * - Returns encrypted_message + iv for encrypted messages (new format)
+ * - Returns message_text for legacy plaintext messages (backward compatibility)
+ * - Legacy messages are READ-ONLY: server does not allow edits, re-sends, or re-indexing
+ * - This ensures backward compatibility while enforcing encryption for new messages
+ * 
+ * ZERO-KNOWLEDGE:
+ * - Server never decrypts messages (zero-knowledge architecture)
+ * - Returns encrypted payload as-is for client-side decryption
  */
 router.get('/direct', optionalAuth, async (req, res) => {
   try {
@@ -454,8 +694,25 @@ router.get('/direct', optionalAuth, async (req, res) => {
       .toArray();
     
     // Clean up response (remove internal hash fields)
+    // SECURITY: Return encrypted_message + iv for encrypted messages
+    // Return legacy message_text only for backward compatibility (deprecated)
+    // Server is zero-knowledge: never decrypts, just stores and returns encrypted payload
     const cleanMessages = messages.map(msg => {
-      const { _id, previous_hash, current_hash, chain_broken, chain_broken_at, createdAt, updatedAt, __v, ...rest } = msg;
+      const { 
+        _id, 
+        previous_hash, 
+        current_hash, 
+        chain_broken, 
+        chain_broken_at, 
+        createdAt, 
+        updatedAt, 
+        __v,
+        ...rest 
+      } = msg;
+      // Return: message_id, workspace_id, channel_id, sender_address, receiver_address,
+      //         encrypted_message (if encrypted), iv (if encrypted),
+      //         message_text (if legacy plaintext - deprecated),
+      //         payload_hash, hash_version, timestamp, file_id
       return rest;
     });
     
@@ -495,9 +752,21 @@ router.get('/workspace/:workspaceId', optionalAuth, async (req, res) => {
       .skip(parseInt(skip))
       .toArray();
     
-    // Clean up response
+    // Clean up response (remove internal hash fields)
+    // SECURITY: Return encrypted_message + iv for encrypted messages
+    // Return legacy message_text only for backward compatibility (deprecated, read-only)
+    // Server is zero-knowledge: never decrypts, just stores and returns encrypted payload
     const cleanMessages = messages.map(msg => {
-      const { _id, previous_hash, current_hash, ...rest } = msg;
+      const { 
+        _id, 
+        previous_hash, 
+        current_hash,
+        ...rest 
+      } = msg;
+      // Return: message_id, workspace_id, channel_id, sender_address, receiver_address,
+      //         encrypted_message (if encrypted), iv (if encrypted),
+      //         message_text (if legacy plaintext - deprecated, read-only),
+      //         payload_hash, hash_version, timestamp, file_id
       return rest;
     });
     

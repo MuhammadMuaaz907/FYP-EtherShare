@@ -539,7 +539,8 @@ CREATE INDEX idx_messages_state ON messages(message_state);
   channel_id: String,
   sender_address: String,
   receiver_address: String,
-  message_text: String,
+  payload_hash: String,             // SHA-256 hash of message_text (message_text NOT stored)
+  hash_version: Number,              // Hash version (1 = legacy, 2 = payload_hash only)
   file_id: String,
   timestamp: Number,
   previous_hash: String,            // Blockchain: Previous block hash

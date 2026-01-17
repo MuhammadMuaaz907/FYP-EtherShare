@@ -98,7 +98,8 @@ The app creates these collections automatically:
   channel_id: String (optional),
   sender_address: String,
   receiver_address: String (for DMs),
-  message_text: String,
+  payload_hash: String,  // SHA-256 hash of message_text (not stored in MongoDB)
+  hash_version: Number,   // Hash version (1 = legacy with message_text, 2 = payload_hash only)
   file_id: String (optional),
   timestamp: Number,
   previous_hash: String,  // Blockchain chain

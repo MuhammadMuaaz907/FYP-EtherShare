@@ -2420,48 +2420,7 @@ class _ChannelPageState extends State<ChannelPage> {
           
           // Messages list
           Expanded(
-            child: _messages.isEmpty
-                ? const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.chat_bubble_outline,
-                                  color: Color(0xFF0F365F),
-                          size: 64,
-                        ),
-                        SizedBox(height: 16),
-                        Text(
-                          'No messages yet',
-                          style: TextStyle(
-                                    color: Color(0xFF828282),
-                            fontSize: 16,
-                          ),
-                        ),
-                        SizedBox(height: 8),
-                        Text(
-                          'Start the conversation!',
-                          style: TextStyle(
-                                    color: Color(0xFFBDBDBD),
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                            controller: _scrollController, // Auto-scroll controller
-                            reverse: false, // Messages: oldest at top, newest at bottom (WhatsApp/Instagram style)
-                            padding: const EdgeInsetsDirectional.fromSTEB(
-                                20, 0, 20, 0),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final message = _messages[index];
-                              final isSent = isCurrentUser(
-                                  message['userAddress']?.toString());
-                              return _buildMessageTile(message, isSent: isSent);
-                    },
-                  ),
+            child: _buildMessagesContent(),
           ),
           
                   // Input area - iMessage style
@@ -3299,6 +3258,158 @@ class _ChannelPageState extends State<ChannelPage> {
         // Default: show confirmed icon (fallback)
         return const Icon(Icons.check_circle, color: Colors.green, size: 16);
     }
+  }
+
+  /// Build messages content widget with chain integrity check
+  /// Checks for chain integrity failures and displays warning if detected
+  /// Otherwise renders normal messages list
+  Widget _buildMessagesContent() {
+    // CRITICAL: Check for chain integrity failure before rendering messages
+    // Chain integrity metadata is attached to the first message by HybridStorageService
+    if (_messages.isNotEmpty && _messages.first['_chainIntegrityFailed'] == true) {
+      // Chain integrity compromised - hide messages for security
+      // This prevents displaying potentially tampered data to users
+      final failureReason = _messages.first['_chainFailureReason']?.toString() ?? 'unknown';
+      final brokenAt = _messages.first['_chainBrokenAt']?.toString() ?? 'unknown';
+      
+      return _buildChainIntegrityWarning(failureReason, brokenAt);
+    }
+    
+    // Chain integrity OK - render messages normally
+    if (_messages.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.chat_bubble_outline,
+              color: Color(0xFF0F365F),
+              size: 64,
+            ),
+            SizedBox(height: 16),
+            Text(
+              'No messages yet',
+              style: TextStyle(
+                color: Color(0xFF828282),
+                fontSize: 16,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Start the conversation!',
+              style: TextStyle(
+                color: Color(0xFFBDBDBD),
+                fontSize: 14,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    // Render messages list (chain integrity is valid)
+    return ListView.builder(
+      controller: _scrollController, // Auto-scroll controller
+      reverse: false, // Messages: oldest at top, newest at bottom (WhatsApp/Instagram style)
+      padding: const EdgeInsetsDirectional.fromSTEB(20, 0, 20, 0),
+      itemCount: _messages.length,
+      itemBuilder: (context, index) {
+        final message = _messages[index];
+        // Check if message is from current user
+        final messageAddress = message['userAddress']?.toString();
+        final isSent = userAddress != null && messageAddress != null &&
+            messageAddress.toLowerCase().trim() == userAddress!.toLowerCase().trim();
+        return _buildMessageTile(message, isSent: isSent);
+      },
+    );
+  }
+  
+  /// Build chain integrity warning widget
+  /// Displays a non-dismissible error banner when chain integrity is compromised
+  Widget _buildChainIntegrityWarning(String failureReason, String brokenAt) {
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.errorContainer,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: Theme.of(context).colorScheme.error,
+            width: 2,
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Warning icon
+            Icon(
+              Icons.warning_rounded,
+              color: Theme.of(context).colorScheme.error,
+              size: 64,
+            ),
+            const SizedBox(height: 20),
+            
+            // Title
+            Text(
+              'Chat integrity compromised',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Theme.of(context).colorScheme.onErrorContainer,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            
+            // Main message
+            Text(
+              'For your safety, messages are hidden because the chat history appears to be tampered with.',
+              style: TextStyle(
+                fontSize: 16,
+                color: Theme.of(context).colorScheme.onErrorContainer,
+                height: 1.5,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            
+            // Failure reason (optional detail)
+            if (failureReason != 'unknown' && failureReason.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.error.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      color: Theme.of(context).colorScheme.error,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Reason: $failureReason',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Theme.of(context).colorScheme.onErrorContainer.withOpacity(0.8),
+                          fontStyle: FontStyle.italic,
+                        ),
+                        textAlign: TextAlign.left,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildMessageTile(Map<String, dynamic> message,

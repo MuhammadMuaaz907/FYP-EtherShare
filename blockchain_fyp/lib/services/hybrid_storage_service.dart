@@ -797,13 +797,138 @@ class HybridStorageService {
     // Try to save to server if online
     if (_isServerOnline) {
       try {
+        // CRITICAL FIX: Retrieve message from SQLite to get encrypted fields and hash fields
+        // Backend requires encrypted_message + iv + payload_hash for v2 messages
+        final db = await SQLiteService.instance.database;
+        final messageRecord = await db.query(
+          'messages',
+          where: 'message_id = ?',
+          whereArgs: [messageId],
+          limit: 1,
+        );
+        
+        if (messageRecord.isEmpty) {
+          print('❌ [SEND FAILED] Message not found in SQLite after insert: $messageId');
+          return null;
+        }
+        
+        final msg = messageRecord.first;
+        final encryptedMessage = msg['encrypted_message'] as String?;
+        final iv = msg['iv'] as String?;
+        final payloadHash = msg['payload_hash'] as String?;
+        final previousHash = msg['previous_hash'] as String?;
+        final currentHash = msg['current_hash'] as String?;
+        final hashVersion = msg['hash_version'] as int?;
+        
+        // CRITICAL: HARD GUARD - Validate ALL required fields before sending
+        // This prevents sending messages with incomplete crypto operations
+        final effectiveHashVersion = hashVersion ?? 2;
+        final isV2 = effectiveHashVersion == 2;
+        
+        // Safe substring helper (shared across method)
+        String safeSubstring(String? str, int len) {
+          if (str == null || str.isEmpty) return '';
+          return str.length > len ? str.substring(0, len) : str;
+        }
+        
+        // CRITICAL: Log all fields for debugging
+        print('📤 [SEND] Preparing to send message to server');
+        print('   Message ID: $messageId');
+        print('   Workspace: $workspaceId, Channel: ${channelId ?? "DM"}');
+        print('   Hash version: $effectiveHashVersion');
+        
+        // HARD GUARD #1: Validate hash version
+        if (effectiveHashVersion != 2 && effectiveHashVersion != 1) {
+          print('❌ [SEND BLOCKED] Invalid hash_version: $effectiveHashVersion (must be 1 or 2)');
+          return null;
+        }
+        
+        // HARD GUARD #2: For v2, validate ALL required crypto fields
+        if (isV2) {
+          if (encryptedMessage == null || encryptedMessage.isEmpty) {
+            print('❌ [SEND BLOCKED] v2 message missing encrypted_message');
+            print('   ⚠️ Crypto operations may not have completed - message not ready to send');
+            return null;
+          }
+          if (iv == null || iv.isEmpty) {
+            print('❌ [SEND BLOCKED] v2 message missing iv');
+            print('   ⚠️ Crypto operations may not have completed - message not ready to send');
+            return null;
+          }
+          if (payloadHash == null || payloadHash.isEmpty) {
+            print('❌ [SEND BLOCKED] v2 message missing payload_hash');
+            print('   ⚠️ Crypto operations may not have completed - message not ready to send');
+            return null;
+          }
+          if (currentHash == null || currentHash.isEmpty) {
+            print('❌ [SEND BLOCKED] v2 message missing current_hash');
+            print('   ⚠️ Hash chain calculation may not have completed - message not ready to send');
+            return null;
+          }
+        }
+        
+        // HARD GUARD #3: Validate previous_hash (handle genesis properly)
+        String validatedPreviousHash;
+        if (previousHash == null || previousHash.isEmpty) {
+          print('⚠️ [GENESIS] previous_hash is empty - using "0" for genesis message');
+          validatedPreviousHash = '0';
+        } else {
+          validatedPreviousHash = previousHash;
+        }
+        
+        // HARD GUARD #4: Validate current_hash format (should be 64-char hex)
+        if (isV2 && currentHash != null && currentHash.isNotEmpty) {
+          if (currentHash.length != 64 || !RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(currentHash)) {
+            print('❌ [SEND BLOCKED] Invalid current_hash format (expected 64-char hex, got ${currentHash.length} chars)');
+            print('   Hash: ${safeSubstring(currentHash, 32)}...');
+            return null;
+          }
+        }
+        
+        // HARD GUARD #5: Validate payload_hash format (should be 64-char hex)
+        if (isV2 && payloadHash != null && payloadHash.isNotEmpty) {
+          if (payloadHash.length != 64 || !RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(payloadHash)) {
+            print('❌ [SEND BLOCKED] Invalid payload_hash format (expected 64-char hex, got ${payloadHash.length} chars)');
+            print('   Hash: ${safeSubstring(payloadHash, 32)}...');
+            return null;
+          }
+        }
+        
+        // Log validated fields
+        print('   ✅ Has encrypted_message: ${encryptedMessage != null && encryptedMessage.isNotEmpty}');
+        print('   ✅ Has iv: ${iv != null && iv.isNotEmpty}');
+        print('   ✅ Has payload_hash: ${payloadHash != null && payloadHash.isNotEmpty}');
+        if (payloadHash != null && payloadHash.isNotEmpty) {
+          print('   Payload hash: ${safeSubstring(payloadHash, 16)}...');
+        }
+        print('   ✅ Has previous_hash: ${validatedPreviousHash.isNotEmpty}');
+        print('   Previous hash: ${safeSubstring(validatedPreviousHash, 16)}... (${validatedPreviousHash == '0' ? 'GENESIS' : 'CHAIN'})');
+        print('   ✅ Has current_hash: ${currentHash != null && currentHash.isNotEmpty}');
+        if (currentHash != null && currentHash.isNotEmpty) {
+          print('   Current hash: ${safeSubstring(currentHash, 16)}...');
+        }
+        
+        // CRITICAL: Verify genesis message handling
+        if (validatedPreviousHash == '0') {
+          print('🔗 [GENESIS] This is the first message in channel (previous_hash = 0)');
+        }
+        
+        print('✅ [SEND VALIDATION] All required fields present - message ready to send');
+        
         final serverMessageId = await DistributedService.addMessage(
           workspaceId: workspaceId,
           channelId: channelId,
           senderAddress: senderAddress,
           receiverAddress: receiverAddress,
-          messageText: messageText,
+          messageText: hashVersion == 1 ? messageText : null, // Only send plaintext for v1
+          encryptedMessage: encryptedMessage, // REQUIRED for v2
+          iv: iv, // REQUIRED for v2
           fileId: fileId,
+          messageId: messageId, // Pass message ID for idempotency
+          previousHash: validatedPreviousHash, // Pass validated previous_hash for chain integrity
+          currentHash: currentHash, // Pass current_hash for chain integrity
+          payloadHash: payloadHash, // REQUIRED for v2
+          hashVersion: hashVersion ?? 2, // Default to 2 for new messages
         );
 
         if (serverMessageId != null) {
@@ -867,16 +992,36 @@ class HybridStorageService {
         print('🔄 Incremental message check: Only fetching new messages since ${DateTime.fromMillisecondsSinceEpoch(sinceTimestamp)}');
         // For incremental checks, load from SQLite first (P2P messages are already in SQLite)
         // We'll only check server if SQLite doesn't have recent messages
-        final sqliteMessages = await SQLiteService.instance.getChannelMessages(
+        final sqliteResult = await SQLiteService.instance.getChannelMessages(
           workspaceId: workspaceId,
           channelId: channelId,
           sinceTimestamp: sinceTimestamp,
         );
         
+        final sqliteMessages = sqliteResult['messages'] as List<Map<String, dynamic>>? ?? [];
+        final chainIntegrityFailed = sqliteResult['chainIntegrityFailed'] as bool? ?? false;
+        
+        // Check chain integrity failure
+        if (chainIntegrityFailed) {
+          final failureReason = sqliteResult['chainFailureReason'] as String? ?? 'unknown';
+          final brokenAt = sqliteResult['chainBrokenAt'] as String? ?? 'unknown';
+          print('⚠️ Chain integrity failed in SQLite: $failureReason at $brokenAt');
+          // Continue to return messages but flag will be propagated to UI
+        }
+        
         if (sqliteMessages.isNotEmpty) {
           print('✅ Found ${sqliteMessages.length} new message(s) in SQLite (since timestamp)');
           // Convert and return SQLite messages (P2P messages are already here)
-          return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+          // Include chain integrity status in converted messages
+          final converted = _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+          // Add chain integrity metadata to first message for UI
+          if (converted.isNotEmpty && chainIntegrityFailed) {
+            converted.first['_chainIntegrityFailed'] = true;
+            converted.first['_chainFailureReason'] = sqliteResult['chainFailureReason'];
+            converted.first['_chainBrokenAt'] = sqliteResult['chainBrokenAt'];
+            converted.first['_chainFailureDetails'] = sqliteResult['chainFailureDetails'];
+          }
+          return converted;
         }
         
         // No new messages in SQLite, check server for new messages
@@ -935,20 +1080,30 @@ class HybridStorageService {
             // If no new messages from server, skip caching and return SQLite messages
             if (messagesToProcess.isEmpty) {
               print('ℹ️ No new messages from server (all older than sinceTimestamp), using SQLite');
-              final sqliteMessages = await SQLiteService.instance.getChannelMessages(
+              final sqliteResult = await SQLiteService.instance.getChannelMessages(
                 workspaceId: workspaceId,
                 channelId: channelId,
                 sinceTimestamp: sinceTimestamp,
               );
-              return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+              final sqliteMessages = sqliteResult['messages'] as List<Map<String, dynamic>>? ?? [];
+              final converted = _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+              // Add chain integrity metadata if failed
+              if (converted.isNotEmpty && (sqliteResult['chainIntegrityFailed'] as bool? ?? false)) {
+                converted.first['_chainIntegrityFailed'] = true;
+                converted.first['_chainFailureReason'] = sqliteResult['chainFailureReason'];
+                converted.first['_chainBrokenAt'] = sqliteResult['chainBrokenAt'];
+                converted.first['_chainFailureDetails'] = sqliteResult['chainFailureDetails'];
+              }
+              return converted;
             }
           }
           
           // First, check how many messages are already in SQLite
-          final existingMessages = await SQLiteService.instance.getChannelMessages(
+          final existingResult = await SQLiteService.instance.getChannelMessages(
             workspaceId: workspaceId,
             channelId: channelId,
           );
+          final existingMessages = existingResult['messages'] as List<Map<String, dynamic>>? ?? [];
           final existingMessageIds = existingMessages
               .map((m) => m['message_id']?.toString())
               .whereType<String>()
@@ -1013,8 +1168,10 @@ class HybridStorageService {
               
               // CRITICAL FIX: Also check for duplicate by content + sender + timestamp
               // This catches duplicates even if messageIds don't match
-              final messageText = msg['message_text']?.toString() ?? msg['messageText']?.toString() ?? '';
+              // NOTE: MongoDB (v2) messages don't have message_text - only payload_hash (ledger data only)
+              final messageText = msg['message_text']?.toString() ?? msg['messageText']?.toString() ?? ''; // Empty for v2 MongoDB messages
               final senderAddress = msg['sender_address']?.toString() ?? msg['senderAddress']?.toString() ?? '';
+              final fromMongoDB = msg['_fromMongoDB'] ?? false; // Flag indicating this is ledger data from MongoDB
               final msgTimestamp = msg['timestamp'];
               
               // Check for duplicate by content + sender + timestamp (within 5 seconds tolerance)
@@ -1080,11 +1237,22 @@ class HybridStorageService {
               }
               
               // Only cache messages that don't already exist
+              // CRITICAL: MongoDB (v2) messages do NOT contain message_text - only payload_hash
+              // MongoDB is ledger data only - message_text is NOT available from server
+              // If messageText is empty (v2 MongoDB message), skip caching to SQLite
+              // The message should already exist in SQLite from local creation with message_text
+              if (messageText.isEmpty && fromMongoDB) {
+                // MongoDB ledger message without message_text - message should already exist in SQLite
+                print('ℹ️ Skipping MongoDB ledger message without message_text: $messageId (should already exist in SQLite)');
+                skipped++;
+                continue;
+              }
+              
               final result = await SQLiteService.instance.addMessage(
                 workspaceId: workspaceId,
                 channelId: channelId,
                 senderAddress: senderAddress,
-                messageText: messageText,
+                messageText: messageText, // For v1 legacy messages only - v2 messages are skipped above
                 fileId: msg['file_id'] ?? msg['fileId'],
                 providedMessageId: messageId, // CRITICAL: Pass server message_id to prevent duplicates
               );
@@ -1124,11 +1292,12 @@ class HybridStorageService {
           
           if (lastHash != null) {
             // Get last message timestamp from SQLite (after caching)
-            final lastSqliteMessages = await SQLiteService.instance.getChannelMessages(
+            final lastSqliteResult = await SQLiteService.instance.getChannelMessages(
               workspaceId: workspaceId,
               channelId: channelId,
               sinceTimestamp: null,
             );
+            final lastSqliteMessages = lastSqliteResult['messages'] as List<Map<String, dynamic>>? ?? [];
             
             int? lastTimestamp;
             if (lastSqliteMessages.isNotEmpty) {
@@ -1144,14 +1313,15 @@ class HybridStorageService {
               lastServerMessageId: lastMessageId,
               lastServerTimestamp: lastTimestamp ?? DateTime.now().millisecondsSinceEpoch,
             );
-            print('🔗 Saved chain state: workspace=$workspaceId, channel=$channelId, hash=${lastHash.substring(0, 10)}...');
+            print('🔗 Saved chain state: workspace=$workspaceId, channel=$channelId, hash=${SQLiteService.safeSubstring(lastHash, 10)}...');
           } else {
             // Fallback: Get last hash from SQLite after caching (if server didn't provide it)
-            final lastSqliteMessages = await SQLiteService.instance.getChannelMessages(
+            final lastSqliteResult = await SQLiteService.instance.getChannelMessages(
               workspaceId: workspaceId,
               channelId: channelId,
               sinceTimestamp: null,
             );
+            final lastSqliteMessages = lastSqliteResult['messages'] as List<Map<String, dynamic>>? ?? [];
             
             if (lastSqliteMessages.isNotEmpty) {
               final lastMsg = lastSqliteMessages.last;
@@ -1167,7 +1337,7 @@ class HybridStorageService {
                   lastServerMessageId: lastMsgId,
                   lastServerTimestamp: lastTimestamp ?? DateTime.now().millisecondsSinceEpoch,
                 );
-                print('🔗 Saved chain state (fallback): hash=${lastHash.substring(0, 10)}...');
+                print('🔗 Saved chain state (fallback): hash=${SQLiteService.safeSubstring(lastHash, 10)}...');
               }
             }
           }
@@ -1180,20 +1350,39 @@ class HybridStorageService {
         
         // Load from SQLite (which now includes server messages + P2P messages)
         // For incremental checks, only load new messages
-        final sqliteMessages = await SQLiteService.instance.getChannelMessages(
+        final sqliteResult = await SQLiteService.instance.getChannelMessages(
           workspaceId: workspaceId,
           channelId: channelId,
           sinceTimestamp: sinceTimestamp, // Only get new messages if sinceTimestamp provided
         );
         
+        final messagesList = sqliteResult['messages'] as List<Map<String, dynamic>>? ?? [];
+        final chainIntegrityFailed = sqliteResult['chainIntegrityFailed'] as bool? ?? false;
+        
         if (sinceTimestamp != null) {
-          print('✅ SQLite returned ${sqliteMessages.length} new message(s) (since timestamp)');
+          print('✅ SQLite returned ${messagesList.length} new message(s) (since timestamp)');
         } else {
-          print('✅ SQLite returned ${sqliteMessages.length} messages (includes server + P2P)');
+          print('✅ SQLite returned ${messagesList.length} messages (includes server + P2P)');
+        }
+        
+        // Check chain integrity failure
+        if (chainIntegrityFailed) {
+          final failureReason = sqliteResult['chainFailureReason'] as String? ?? 'unknown';
+          final brokenAt = sqliteResult['chainBrokenAt'] as String? ?? 'unknown';
+          print('⚠️ Chain integrity failed in SQLite: $failureReason at $brokenAt');
         }
         
         // Convert SQLite format to UI format
-        return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+        final converted = _convertSQLiteMessages(messagesList, workspaceId, channelId);
+        
+        // Add chain integrity metadata if available
+        if (converted.isNotEmpty && chainIntegrityFailed) {
+          converted.first['_chainIntegrityFailed'] = true;
+          converted.first['_chainFailureReason'] = sqliteResult['chainFailureReason'];
+          converted.first['_chainBrokenAt'] = sqliteResult['chainBrokenAt'];
+          converted.first['_chainFailureDetails'] = sqliteResult['chainFailureDetails'];
+        }
+        return converted;
       } on ChainBrokenException catch (e) {
         // Chain is broken - this channel's integrity is compromised
         print('❌ Chain broken for channel $channelId - hiding messages');
@@ -1215,25 +1404,46 @@ class HybridStorageService {
     } else {
       print('📦 Loading messages from SQLite for channel $channelId');
     }
-    final sqliteMessages = await SQLiteService.instance.getChannelMessages(
+    final sqliteResult = await SQLiteService.instance.getChannelMessages(
       workspaceId: workspaceId,
       channelId: channelId,
       sinceTimestamp: sinceTimestamp, // Only get new messages if sinceTimestamp provided
     );
     
+    final messagesList = sqliteResult['messages'] as List<Map<String, dynamic>>? ?? [];
+    final chainIntegrityFailed = sqliteResult['chainIntegrityFailed'] as bool? ?? false;
+    
     if (sinceTimestamp != null) {
-      print('✅ SQLite returned ${sqliteMessages.length} new message(s) (since timestamp)');
+      print('✅ SQLite returned ${messagesList.length} new message(s) (since timestamp)');
     } else {
-      print('✅ SQLite returned ${sqliteMessages.length} messages');
+      print('✅ SQLite returned ${messagesList.length} messages');
     }
+    
+    // Check chain integrity failure
+    if (chainIntegrityFailed) {
+      final failureReason = sqliteResult['chainFailureReason'] as String? ?? 'unknown';
+      final brokenAt = sqliteResult['chainBrokenAt'] as String? ?? 'unknown';
+      print('⚠️ Chain integrity failed in SQLite: $failureReason at $brokenAt');
+      print('   Details: ${sqliteResult['chainFailureDetails']}');
+    }
+    
+    // Convert messages and add chain integrity metadata
+    final converted = _convertSQLiteMessages(messagesList, workspaceId, channelId);
     
     // Debug: Log first SQLite message if available
-    if (sqliteMessages.isNotEmpty) {
-      print('📋 First SQLite message keys: ${sqliteMessages.first.keys.toList()}');
-      print('📋 First SQLite message_text: ${sqliteMessages.first['message_text']}');
+    if (converted.isNotEmpty) {
+      print('📋 First SQLite message keys: ${converted.first.keys.toList()}');
+      print('📋 First SQLite message_text: ${converted.first['message_text']}');
     }
     
-    return _convertSQLiteMessages(sqliteMessages, workspaceId, channelId);
+    // Add chain integrity metadata to first message for UI
+    if (converted.isNotEmpty && chainIntegrityFailed) {
+      converted.first['_chainIntegrityFailed'] = true;
+      converted.first['_chainFailureReason'] = sqliteResult['chainFailureReason'];
+      converted.first['_chainBrokenAt'] = sqliteResult['chainBrokenAt'];
+      converted.first['_chainFailureDetails'] = sqliteResult['chainFailureDetails'];
+    }
+    return converted;
   }
 
   /// Convert SQLite messages to UI format (helper method)
@@ -1444,17 +1654,18 @@ class HybridStorageService {
                 lastServerMessageId: lastMessageId,
                 lastServerTimestamp: DateTime.now().millisecondsSinceEpoch,
               );
-              print('🔗 Stored MongoDB last hash BEFORE sync: workspace=$workspaceId, channel=$channelId, hash=${lastHash.substring(0, 10)}...');
+              print('🔗 Stored MongoDB last hash BEFORE sync: workspace=$workspaceId, channel=$channelId, hash=${SQLiteService.safeSubstring(lastHash, 10)}...');
             } else {
               // Fallback: Get last hash from SQLite (if server didn't provide it)
-              final lastSqliteMessages = await SQLiteService.instance.getChannelMessages(
+              final lastSqliteResult2 = await SQLiteService.instance.getChannelMessages(
                 workspaceId: workspaceId,
                 channelId: channelId,
                 sinceTimestamp: null,
               );
+              final lastSqliteMessages2 = lastSqliteResult2['messages'] as List<Map<String, dynamic>>? ?? [];
               
-              if (lastSqliteMessages.isNotEmpty) {
-                final lastMsg = lastSqliteMessages.last;
+              if (lastSqliteMessages2.isNotEmpty) {
+                final lastMsg = lastSqliteMessages2.last;
                 final lastHash = lastMsg['current_hash'] as String?;
                 final lastMsgId = lastMsg['message_id'] as String?;
                 final lastTimestamp = lastMsg['timestamp'] as int?;
@@ -1467,7 +1678,7 @@ class HybridStorageService {
                     lastServerMessageId: lastMsgId,
                     lastServerTimestamp: lastTimestamp ?? DateTime.now().millisecondsSinceEpoch,
                   );
-                  print('🔗 Stored SQLite last hash BEFORE sync (fallback): hash=${lastHash.substring(0, 10)}...');
+                  print('🔗 Stored SQLite last hash BEFORE sync (fallback): hash=${SQLiteService.safeSubstring(lastHash, 10)}...');
                 }
               }
             }
@@ -1530,41 +1741,95 @@ class HybridStorageService {
       
       // PHASE 3: Process only PENDING_SYNC messages (already marked above)
       for (final msg in pendingSyncMessages) {
+        String? localMessageId; // Declare outside try block for error logging
         try {
-          final localMessageId = msg['message_id'] as String?;
+          localMessageId = msg['message_id'] as String?;
           final workspaceId = msg['workspace_id'] as String?;
           final channelId = msg['channel_id'] as String?;
+          final senderAddress = msg['sender_address'] as String?;
+          final messageText = msg['message_text'] as String?;
+          final previousHash = msg['previous_hash'] as String?;
+          final currentHash = msg['current_hash'] as String?;
+          final payloadHash = msg['payload_hash'] as String?;
+          final hashVersion = msg['hash_version'] as int?;
           
+          // CRITICAL: Validate all required fields before sync
           if (localMessageId == null || localMessageId.isEmpty) {
-            print('⚠️ Skipping message without messageId');
+            print('⚠️ [OFFLINE SYNC] Skipping message without messageId: ${msg.toString()}');
+            continue;
+          }
+          
+          if (workspaceId == null || workspaceId.isEmpty) {
+            print('⚠️ [OFFLINE SYNC] Skipping message $localMessageId without workspaceId');
+            continue;
+          }
+          
+          if (senderAddress == null || senderAddress.isEmpty) {
+            print('⚠️ [OFFLINE SYNC] Skipping message $localMessageId without senderAddress');
+            continue;
+          }
+          
+          if (messageText == null || messageText.isEmpty) {
+            print('⚠️ [OFFLINE SYNC] Skipping message $localMessageId without messageText');
+            continue;
+          }
+          
+          // Validate blockchain fields for hash_version 2
+          final effectiveHashVersion = hashVersion ?? 2; // Default to 2 for new messages
+          if (effectiveHashVersion == 2) {
+            if (payloadHash == null || payloadHash.isEmpty) {
+              print('⚠️ [OFFLINE SYNC] Skipping v2 message $localMessageId without payload_hash - calculating...');
+              // Calculate payload_hash if missing (shouldn't happen, but handle gracefully)
+              // This would be a data integrity issue - log it
+              print('❌ [DATA INTEGRITY] Message $localMessageId is v2 but missing payload_hash - this should not happen');
+            }
+          }
+          
+          if (previousHash == null || previousHash.isEmpty) {
+            print('⚠️ [OFFLINE SYNC] Warning: Message $localMessageId has empty previous_hash, using "0"');
+          }
+          
+          if (currentHash == null || currentHash.isEmpty) {
+            print('⚠️ [OFFLINE SYNC] Skipping message $localMessageId without current_hash (required for chain integrity)');
             continue;
           }
 
           // Double-check if message is already synced (race condition protection)
           final isSynced = await SQLiteService.instance.isMessageSynced(localMessageId);
           if (isSynced) {
-            print('ℹ️ Message $localMessageId already synced, skipping');
+            print('ℹ️ [OFFLINE SYNC] Message $localMessageId already synced, skipping');
             continue;
           }
+          
+          // Log offline sync attempt with all fields
+          print('📤 [OFFLINE SYNC] Attempting to sync message $localMessageId');
+          print('   Workspace: $workspaceId, Channel: $channelId');
+          print('   Hash version: ${effectiveHashVersion}, Payload hash: ${SQLiteService.safeSubstring(payloadHash, 10)}...');
+          print('   Previous hash: ${SQLiteService.safeSubstring(previousHash, 10)}..., Current hash: ${SQLiteService.safeSubstring(currentHash, 10)}...');
 
-          // PHASE 3 STEP 3: Send headers to server
-          // Headers: message_id, channel_id, prev_hash, current_hash, timestamp
+          // PHASE 3 STEP 3: Send headers to server with offline_sync flag
+          // Headers: message_id, channel_id, prev_hash, current_hash, payload_hash, hash_version, timestamp
           // Server validates and confirms (idempotent - no re-insert if duplicate)
+          // CRITICAL: Mark as offline sync so backend can handle previous_hash mismatch gracefully
+          // Note: At this point, workspaceId, senderAddress, messageText, currentHash are guaranteed non-null
           final serverMessageId = await DistributedService.addMessage(
-            workspaceId: workspaceId ?? '',
+            workspaceId: workspaceId,
             channelId: channelId,
-            senderAddress: msg['sender_address'] ?? '',
+            senderAddress: senderAddress,
             receiverAddress: msg['receiver_address'],
-            messageText: msg['message_text'] ?? '',
+            messageText: messageText,
             fileId: msg['file_id'],
             messageId: localMessageId, // CRITICAL: Pass existing message_id for idempotency
-            previousHash: msg['previous_hash'] as String?, // Header: prev_hash
-            currentHash: msg['current_hash'] as String?, // Header: current_hash
-            // timestamp is included in messageData on server side
+            previousHash: previousHash, // Header: prev_hash (may not match server if offline for long)
+            currentHash: currentHash, // Header: current_hash
+            payloadHash: payloadHash, // Header: payload_hash (stable hash)
+            hashVersion: effectiveHashVersion, // Header: hash_version (preserve version)
+            isOfflineSync: true, // NEW: Flag to indicate offline sync (allow hash re-anchoring)
           );
 
           // PHASE 3 STEP 4: Server validates + confirms (returns message_id if successful)
-          if (serverMessageId != null) {
+          if (serverMessageId != null && serverMessageId.isNotEmpty) {
+            print('✅ [OFFLINE SYNC] Message $localMessageId successfully synced to server: $serverMessageId');
             // PHASE 3 STEP 5: Client updates state to SYNCED
             // Update SQLite message with server messageId if different
             if (serverMessageId != localMessageId) {
@@ -1581,17 +1846,21 @@ class HybridStorageService {
               messageId: serverMessageId != localMessageId ? serverMessageId : localMessageId,
               state: 'SYNCED',
             );
-            print('✅ PHASE 3: Message synced (state: SYNCED) - NO UI re-render, NO block re-creation');
+            print('✅ [OFFLINE SYNC] PHASE 3: Message synced (state: SYNCED) - NO UI re-render, NO block re-creation');
             
             syncedMessageCount++;
             
             // Track channel for chain state clearing
-            if (workspaceId != null && channelId != null) {
-              syncedChannels.add('$workspaceId:$channelId');
-            }
+            syncedChannels.add('$workspaceId:$channelId');
+          } else {
+            // Server returned null or empty - sync failed
+            print('❌ [OFFLINE SYNC] Message $localMessageId sync failed: server returned null or empty messageId');
+            print('   This usually indicates server rejected the message - check server logs for details');
           }
         } catch (e) {
-          print('⚠️ Sync message error: $e');
+          final msgId = localMessageId ?? msg['message_id']?.toString() ?? 'unknown';
+          print('❌ [OFFLINE SYNC] Message $msgId sync error: $e');
+          print('   Stack trace: ${StackTrace.current}');
           // On error, keep message in PENDING_SYNC state for retry
         }
       }
@@ -1625,7 +1894,7 @@ class HybridStorageService {
                   lastServerMessageId: lastMessageId,
                   lastServerTimestamp: DateTime.now().millisecondsSinceEpoch,
                 );
-                print('🔗 Updated chain state AFTER sync: workspace=$workspaceId, channel=$channelId, hash=${lastHash.substring(0, 10)}...');
+                print('🔗 Updated chain state AFTER sync: workspace=$workspaceId, channel=$channelId, hash=${SQLiteService.safeSubstring(lastHash, 10)}...');
               } else {
                 // If server didn't provide hash, clear chain state (fresh start)
                 await SQLiteService.instance.clearChainState(

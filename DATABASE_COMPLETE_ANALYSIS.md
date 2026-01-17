@@ -203,7 +203,8 @@ Yeh collection **messages** store karti hai - channel messages aur direct messag
   channel_id: String,                // Optional - channel message hai to
   sender_address: String,            // Sender ka address
   receiver_address: String,          // Optional - DM hai to receiver ka address
-  message_text: String,              // Message ka content (1-5000 characters)
+  payload_hash: String,              // SHA-256 hash of message_text (message_text NOT stored)
+  hash_version: Number,               // Hash version (1 = legacy, 2 = payload_hash only)
   file_id: String,                   // Optional - agar file attached hai to
   timestamp: Number,                 // Message timestamp
   previous_hash: String,             // Previous message ka hash (blockchain chain)
@@ -225,7 +226,8 @@ Yeh collection **messages** store karti hai - channel messages aur direct messag
   "workspace_id": "ws_0x1234567890abcdef_1703123456789",
   "channel_id": "general",
   "sender_address": "0x1234567890abcdef",
-  "message_text": "Hello everyone!",
+  "payload_hash": "abc123def456...",
+  "hash_version": 2,
   "timestamp": 1703123456789,
   "previous_hash": "0xabc123...",
   "current_hash": "0xdef456..."
@@ -241,7 +243,7 @@ Yeh collection **messages** store karti hai - channel messages aur direct messag
 - `timestamp` - Sort by time
 
 ### 🎯 Kya Kya Store Hota Hai:
-- Message content
+- Payload hash (SHA-256 of message_text) - message_text itself NOT stored
 - Sender aur receiver addresses
 - Workspace aur channel references
 - File attachments (file_id reference)

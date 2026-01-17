@@ -7,14 +7,42 @@ const crypto = require('crypto');
 class HashChain {
   /**
    * Calculate SHA-256 hash for blockchain-like chain
+   * Supports hash_version-based hashing:
+   * - Version 1: Uses message_text in hash calculation (legacy)
+   * - Version 2: Uses payload_hash in hash calculation (new)
    * @param {Object} data - Data object to hash
    * @param {String} previousHash - Previous hash in the chain
+   * @param {Number} hashVersion - Hash version (1 = message_text, 2 = payload_hash)
    * @returns {String} SHA-256 hash
    */
-  static calculateHash(data, previousHash) {
+  static calculateHash(data, previousHash, hashVersion = 1) {
     try {
+      // Create a copy of data for modification
+      const dataToHash = { ...data };
+      
+      // For hash version 2, replace message_text with payload_hash
+      if (hashVersion === 2) {
+        const payloadHash = dataToHash.payload_hash;
+        if (payloadHash && payloadHash.trim().length > 0) {
+          // Remove message_text and use payload_hash instead
+          delete dataToHash.message_text;
+          // payload_hash is already in the map, so we use it
+        } else {
+          // Fallback: if payload_hash not available, calculate it from message_text
+          const messageText = dataToHash.message_text || '';
+          if (messageText.trim().length > 0) {
+            const calculatedPayloadHash = crypto.createHash('sha256')
+              .update(messageText, 'utf8')
+              .digest('hex');
+            delete dataToHash.message_text;
+            dataToHash.payload_hash = calculatedPayloadHash;
+          }
+        }
+      }
+      // For hash version 1, keep message_text (default behavior)
+      
       // Convert data to JSON string (sorted keys for consistency)
-      const dataString = JSON.stringify(data, Object.keys(data).sort());
+      const dataString = JSON.stringify(dataToHash, Object.keys(dataToHash).sort());
       const combined = `${dataString}${previousHash}`;
       
       // Calculate SHA-256 hash
@@ -198,22 +226,40 @@ class HashChain {
         }
         
         // Recalculate hash to verify current_hash
+        // Support mixed hash versions (v1 uses message_text, v2 uses payload_hash)
+        const hashVersion = doc.hash_version || 1; // Default to 1 if not set (backward compatibility)
+        
         // Only include fields that were present when hash was created
         const dataForHash = {
           message_id: doc.message_id,
           workspace_id: doc.workspace_id,
           sender_address: doc.sender_address,
-          message_text: doc.message_text,
           timestamp: doc.timestamp
         };
+        
+        // For hash version 1, include message_text (if it exists - backward compatibility)
+        // For hash version 2, message_text is NOT stored in MongoDB, only payload_hash is used
+        if (hashVersion === 1 && doc.message_text) {
+          dataForHash.message_text = doc.message_text;
+        }
         
         // Add optional fields only if they exist
         if (doc.channel_id) dataForHash.channel_id = doc.channel_id;
         if (doc.receiver_address) dataForHash.receiver_address = doc.receiver_address;
         if (doc.file_id) dataForHash.file_id = doc.file_id;
         
-        // Calculate hash using only the original data fields
-        const calculatedHash = this.calculateHash(dataForHash, previousHash);
+        // For hash version 2, include payload_hash in dataForHash (required for v2)
+        if (hashVersion === 2) {
+          if (doc.payload_hash) {
+            dataForHash.payload_hash = doc.payload_hash;
+          } else {
+            // v2 message without payload_hash is invalid
+            console.error(`⚠️ Hash version 2 message ${doc.message_id} missing payload_hash`);
+          }
+        }
+        
+        // Calculate hash using hash_version-aware logic
+        const calculatedHash = this.calculateHash(dataForHash, previousHash, hashVersion);
         
         if (calculatedHash !== currentHash) {
           brokenAt = doc._id?.toString() || doc.message_id || doc.channel_id || 'unknown';
@@ -226,9 +272,11 @@ class HashChain {
           console.error(`   Previous hash: ${previousHash}`);
           console.error(`   ⚠️ MESSAGE DATA HAS BEEN MODIFIED - Chain integrity compromised!`);
           
-          // Additional check: Compare actual message text to detect what changed
-          if (doc.message_text) {
+          // Additional check: Log message data to detect what changed
+          if (hashVersion === 1 && doc.message_text) {
             console.error(`   Current message_text in DB: "${doc.message_text}"`);
+          } else if (hashVersion === 2 && doc.payload_hash) {
+            console.error(`   Current payload_hash in DB: "${doc.payload_hash.substring(0, 20)}..."`);
           }
           
           details.brokenDocuments.push({
@@ -369,8 +417,11 @@ class HashChain {
         console.log(`⚠️ Hash verification failed on retry ${retryCount} - hash changed, continuing with new hash`);
       }
       
-      // Calculate current hash with the verified previous hash
-      const currentHash = this.calculateHash(documentData, previousHash);
+      // Determine hash version (default to 2 for new messages, 1 for backward compatibility)
+      const hashVersion = documentData.hash_version || 2;
+      
+      // Calculate current hash with the verified previous hash and hash version
+      const currentHash = this.calculateHash(documentData, previousHash, hashVersion);
       
       // CRITICAL: Verify the hash hasn't changed AFTER calculation but BEFORE returning
       // This is the most important check - if another message was inserted while we calculated,

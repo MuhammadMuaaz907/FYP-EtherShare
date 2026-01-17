@@ -909,33 +909,70 @@ class DistributedService {
 
   /// Add message (compatible with MongoDBService)
   /// Uses both messages API (legacy) and distributed ledger system
-  /// CRITICAL: Supports idempotent sync with messageId, previousHash, currentHash
+  /// CRITICAL: Supports idempotent sync with messageId, previousHash, currentHash, payloadHash, hashVersion, isOfflineSync
+  /// SECURITY: For v2 messages, encryptedMessage and iv must be provided (backend rejects plaintext)
   static Future<String?> addMessage({
     required String workspaceId,
     String? channelId,
     required String senderAddress,
     String? receiverAddress,
-    required String messageText,
+    String? messageText, // DEPRECATED: Only for legacy v1 messages
+    String? encryptedMessage, // REQUIRED for v2: Base64-encoded encrypted message
+    String? iv, // REQUIRED for v2: Base64-encoded initialization vector
     String? fileId,
     String? messageId, // Optional: existing message_id for idempotent sync
     String? previousHash, // Optional: previous_hash for idempotent sync
     String? currentHash, // Optional: current_hash for idempotent sync
+    String? payloadHash, // REQUIRED for v2: payload_hash (calculated from plaintext before encryption)
+    int? hashVersion, // Optional: hash_version (defaults to 2 for encrypted messages)
+    bool isOfflineSync = false, // Optional: flag for offline sync (allows hash re-anchoring)
   }) async {
     try {
       String? returnedMessageId;
+      
+      // CRITICAL: Determine if this is v2 (encrypted) or v1 (legacy plaintext)
+      final hasEncryptedFields = encryptedMessage != null && encryptedMessage.isNotEmpty && 
+                                 iv != null && iv.isNotEmpty && 
+                                 payloadHash != null && payloadHash.isNotEmpty;
+      final effectiveHashVersion = hashVersion ?? (hasEncryptedFields ? 2 : 1);
+      
+      // SECURITY: For v2 messages, backend requires encrypted fields and rejects plaintext
+      if (effectiveHashVersion == 2) {
+        // Validate required v2 fields
+        if (!hasEncryptedFields) {
+          print('❌ [SECURITY] v2 message missing required encrypted fields');
+          print('   encrypted_message: ${encryptedMessage != null && encryptedMessage.isNotEmpty}');
+          print('   iv: ${iv != null && iv.isNotEmpty}');
+          print('   payload_hash: ${payloadHash != null && payloadHash.isNotEmpty}');
+          return null;
+        }
+      }
       
       // First, add to messages API (for backward compatibility and immediate access)
       // CRITICAL: Include messageId, previousHash, currentHash for idempotent sync
       try {
         final messagesUrl = Uri.parse('$baseUrl/api/messages');
-        final requestBody = {
+        final requestBody = <String, dynamic>{
           'workspaceId': workspaceId,
           'channelId': channelId,
           'senderAddress': senderAddress,
           'receiverAddress': receiverAddress,
-          'messageText': messageText,
           'fileId': fileId,
         };
+        
+        // CRITICAL: For v2 messages, send encrypted fields (backend rejects plaintext)
+        if (hasEncryptedFields && effectiveHashVersion == 2) {
+          requestBody['encryptedMessage'] = encryptedMessage;
+          requestBody['iv'] = iv;
+          requestBody['payloadHash'] = payloadHash;
+          requestBody['hashVersion'] = effectiveHashVersion;
+          // DO NOT send messageText for v2 (backend rejects it)
+        } else {
+          // Legacy v1: send plaintext (deprecated but still supported for backward compatibility)
+          if (messageText != null && messageText.isNotEmpty) {
+            requestBody['messageText'] = messageText;
+          }
+        }
         
         // CRITICAL: Add idempotency fields if provided (for sync)
         // Use parameter messageId (not local variable) to avoid shadowing bug
@@ -948,6 +985,23 @@ class DistributedService {
         if (currentHash != null && currentHash.isNotEmpty) {
           requestBody['currentHash'] = currentHash;
         }
+        if (payloadHash != null && payloadHash.isNotEmpty) {
+          requestBody['payloadHash'] = payloadHash; // Preserve payload_hash during sync
+        }
+        if (hashVersion != null) {
+          requestBody['hashVersion'] = hashVersion; // Preserve hash_version during sync
+        }
+        if (isOfflineSync) {
+          requestBody['isOfflineSync'] = true; // NEW: Flag for offline sync handling
+        }
+        
+        print('📤 [SEND] Sending message to backend API');
+        print('   Message ID: ${messageId ?? "pending"}');
+        print('   Hash version: $effectiveHashVersion');
+        print('   Has encrypted fields: $hasEncryptedFields');
+        print('   Has payload_hash: ${payloadHash != null && payloadHash.isNotEmpty}');
+        print('   Has previous_hash: ${previousHash != null && previousHash.isNotEmpty}');
+        print('   Has current_hash: ${currentHash != null && currentHash.isNotEmpty}');
         
         final messagesResponse = await http.post(
           messagesUrl,
@@ -959,29 +1013,65 @@ class DistributedService {
           final messagesData = jsonDecode(messagesResponse.body);
           returnedMessageId = messagesData['data']?['message_id'] as String? ?? messageId;
           print('✅ Message added to messages API: $returnedMessageId');
+        } else {
+          // Log detailed error for debugging
+          final errorBody = messagesResponse.body;
+          print('❌ [SEND FAILED] Backend rejected message');
+          print('   Status: ${messagesResponse.statusCode}');
+          print('   Response: $errorBody');
+          try {
+            final errorData = jsonDecode(errorBody);
+            print('   Error: ${errorData['error']}');
+            print('   Message: ${errorData['message']}');
+          } catch (e) {
+            print('   Could not parse error response');
+          }
+          // Don't continue to ledger if API failed - return null to indicate failure
+          return null;
         }
       } catch (e) {
-        print('⚠️ Messages API error (continuing with ledger): $e');
+        print('❌ [SEND ERROR] Messages API error: $e');
+        print('   Stack trace: ${StackTrace.current}');
+        // Return null to indicate failure
+        return null;
       }
 
       // Also add to distributed ledger system (for chain integrity)
+      // CRITICAL: For v2 encrypted messages, use payload_hash as content reference
+      // For v1 legacy messages, use plaintext messageText
       try {
         final nodeId = await getFirstNodeId();
         if (nodeId != null) {
-          final block = await addBlockToLedger(
-            nodeId: nodeId,
-            senderAddress: senderAddress,
-            receiverAddress: receiverAddress,
-            content: messageText,
-            workspaceId: workspaceId,
-            type: 'message',
-          );
+          // Determine content for ledger: use payload_hash for v2, messageText for v1
+          String? ledgerContent;
+          if (hasEncryptedFields && effectiveHashVersion == 2) {
+            // v2: Use payload_hash as content reference (ledger doesn't need plaintext)
+            ledgerContent = payloadHash;
+            print('📋 [LEDGER] Using payload_hash as content reference for v2 message');
+          } else if (messageText != null && messageText.isNotEmpty) {
+            // v1: Use plaintext (legacy)
+            ledgerContent = messageText;
+          }
+          
+          // Only add to ledger if we have content
+          if (ledgerContent != null && ledgerContent.isNotEmpty) {
+            final block = await addBlockToLedger(
+              nodeId: nodeId,
+              senderAddress: senderAddress,
+              receiverAddress: receiverAddress,
+              content: ledgerContent, // payload_hash for v2, messageText for v1
+              workspaceId: workspaceId,
+              type: 'message',
+            );
 
-          if (block != null) {
-            final blockId = block['block_id'] as String? ?? block['_id']?.toString();
-            print('✅ Message added to ledger: $blockId');
-            // Use block ID if message ID not available
-            returnedMessageId ??= blockId;
+            if (block != null) {
+              final blockId = block['block_id'] as String? ?? block['_id']?.toString();
+              print('✅ Message added to ledger: $blockId');
+              // Use block ID if message ID not available
+              returnedMessageId ??= blockId;
+            }
+          } else {
+            print('⚠️ No content available for ledger (v2 encrypted message - already in messages API)');
           }
         } else {
           print('⚠️ No node available for ledger (message still saved to API)');
@@ -1250,9 +1340,13 @@ class DistributedService {
         
         // Transform MongoDB message format to UI format
         // Backend returns messages directly in the 'data' array
+        // CRITICAL: MongoDB messages do NOT contain message_text - only payload_hash is stored
+        // MongoDB is treated as ledger data only - message_text is NOT available from server
+        // UI should get message_text from SQLite (local storage), not from MongoDB
         final transformed = messages.map((msg) {
-          // Messages from MongoDB have these fields:
-          // message_id, message_text, sender_address, receiver_address, timestamp, workspace_id, channel_id, etc.
+          // Messages from MongoDB (ledger data only) have these fields:
+          // message_id, payload_hash, hash_version, sender_address, receiver_address, timestamp, workspace_id, channel_id, etc.
+          // NOTE: message_text is NOT in MongoDB - it's only stored locally in SQLite
           
           // Handle both formats: direct MongoDB messages and ledger format
           if (msg.containsKey('data') && msg['data'] is Map) {
@@ -1272,9 +1366,12 @@ class DistributedService {
               timestamp = DateTime.now();
             }
             
+            // CRITICAL: MongoDB doesn't have message_text - only payload_hash
+            // For ledger format, try content field, but message_text won't be available
             final messageText = msgData['content']?.toString() ?? 
-                               msgData['message_text']?.toString() ?? 
-                               msg['message_text']?.toString() ?? '';
+                               msgData['message_text']?.toString() ?? // Legacy v1 may have it
+                               msg['message_text']?.toString() ?? ''; // Legacy v1 may have it
+            // Note: For v2 messages, message_text is NOT in MongoDB - must get from SQLite
             
             return {
               'message_id': msg['block_id']?.toString() ?? msg['_id']?.toString() ?? msg['message_id']?.toString(),
@@ -1313,12 +1410,20 @@ class DistributedService {
               timestamp = DateTime.now();
             }
             
-            final messageText = msg['message_text']?.toString() ?? '';
+            // CRITICAL: MongoDB messages (v2) do NOT contain message_text - only payload_hash
+            // message_text is NOT available from MongoDB (ledger data only)
+            // UI must get message_text from SQLite (local storage), not from MongoDB
+            // For v1 legacy messages, message_text might exist, but for v2 it won't
+            final messageText = msg['message_text']?.toString() ?? ''; // Empty for v2 messages - will be filled from SQLite
+            final payloadHash = msg['payload_hash']?.toString(); // Available for v2 messages
             
             return {
               'message_id': msg['message_id']?.toString() ?? msg['_id']?.toString(),
-              'message_text': messageText,
-              'messageText': messageText,
+              'message_text': messageText, // Empty for v2 - MongoDB doesn't store message_text
+              'messageText': messageText, // Empty for v2 - MongoDB doesn't store message_text
+              'payload_hash': payloadHash, // Available for v2 messages (ledger data)
+              'hash_version': msg['hash_version'] ?? 2, // Track hash version
+              '_fromMongoDB': true, // Flag to indicate this is ledger data (no message_text)
               'sender_address': msg['sender_address']?.toString() ?? '',
               'senderAddress': msg['sender_address']?.toString() ?? '',
               'receiver_address': msg['receiver_address']?.toString(),
@@ -1432,8 +1537,13 @@ class DistributedService {
             final msgData = msg['data'] as Map<String, dynamic>;
             return {
               'message_id': msg['block_id'] ?? msg['_id'] ?? msg['message_id'],
-              'message_text': msgData['content'] ?? msgData['message_text'] ?? msg['message_text'] ?? '',
-              'messageText': msgData['content'] ?? msgData['message_text'] ?? msg['message_text'] ?? '',
+              // CRITICAL: MongoDB doesn't have message_text - only payload_hash (for v2)
+              // For v1 legacy messages, message_text might exist, but for v2 it won't
+              'message_text': msgData['content'] ?? msgData['message_text'] ?? msg['message_text'] ?? '', // Empty for v2
+              'messageText': msgData['content'] ?? msgData['message_text'] ?? msg['message_text'] ?? '', // Empty for v2
+              'payload_hash': msg['payload_hash'] ?? msgData['payload_hash'], // Available for v2
+              'hash_version': msg['hash_version'] ?? msgData['hash_version'] ?? 2,
+              '_fromMongoDB': true, // Flag to indicate this is ledger data (no message_text)
               'sender_address': msgData['sender_address'] ?? msg['sender_address'] ?? '',
               'senderAddress': msgData['sender_address'] ?? msg['sender_address'] ?? '',
               'receiver_address': msgData['receiver_address'] ?? msg['receiver_address'],
@@ -1445,8 +1555,13 @@ class DistributedService {
             // Direct MongoDB format (messages are already in correct format)
             return {
               'message_id': msg['message_id'] ?? msg['_id']?.toString(),
-              'message_text': msg['message_text'] ?? '',
-              'messageText': msg['message_text'] ?? '',
+              // CRITICAL: MongoDB messages (v2) do NOT contain message_text - only payload_hash
+              // message_text is NOT available from MongoDB (ledger data only)
+              'message_text': msg['message_text'] ?? '', // Empty for v2 - MongoDB doesn't store message_text
+              'messageText': msg['message_text'] ?? '', // Empty for v2 - MongoDB doesn't store message_text
+              'payload_hash': msg['payload_hash'], // Available for v2 messages (ledger data)
+              'hash_version': msg['hash_version'] ?? 2, // Track hash version
+              '_fromMongoDB': true, // Flag to indicate this is ledger data (no message_text)
               'sender_address': msg['sender_address'] ?? '',
               'senderAddress': msg['sender_address'] ?? '',
               'receiver_address': msg['receiver_address'],

@@ -64,12 +64,13 @@ Aapke system mein yeh collections hain:
   workspace_id: "ws_123",
   sender_address: "userA",
   receiver_address: "userB",
-  message_text: "Hello",
+  payload_hash: "abc123def456...",  // SHA-256 hash of message_text
+  hash_version: 2,                  // Hash version (1 = legacy, 2 = payload_hash only)
   timestamp: 1234567890
 }
 ```
 
-**Purpose:** UserA se UserB tak messages store karta hai.
+**Purpose:** UserA se UserB tak messages store karta hai. Note: message_text is NOT stored in MongoDB, only payload_hash is stored.
 
 ---
 
