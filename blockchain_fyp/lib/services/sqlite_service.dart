@@ -799,36 +799,51 @@ class SQLiteService {
         limit: 1,
       );
 
-      String previousHash = '0';
+      // CRITICAL GENESIS HANDLING: previous_hash must NEVER be null or empty
+      // - For genesis (first message): previous_hash = "0" (exactly, not empty)
+      // - For chain messages: previous_hash = last message's current_hash (64-char hex)
+      // - previous_hash is ALWAYS a valid string (never null/empty)
+      String previousHash = '0'; // Default to genesis
+      bool isGenesis = true;
       
-      // If we have stored server hash and no SQLite messages, use server hash
-      // This links SQLite chain to server chain
-      if (storedServerHash != null && lastMessage.isEmpty) {
-        previousHash = storedServerHash;
-        print('🔗 Using stored server hash as previous_hash: ${safeSubstring(storedServerHash, 10)}...');
-      } else if (lastMessage.isNotEmpty) {
-        // Use last SQLite message hash (normal case)
-        previousHash = lastMessage.first['current_hash'] as String? ?? '0';
-      } else if (storedServerHash != null && lastMessage.isNotEmpty) {
-        // CRITICAL FIX: If we have stored server hash AND SQLite messages,
-        // we need to check if SQLite messages are synced or not
-        // If SQLite messages are NOT synced, they should use stored server hash
-        // If SQLite messages ARE synced, they should use SQLite's last hash (chain continues from SQLite)
-        
-        // Check if last SQLite message is synced
-        final lastMsgSynced = lastMessage.first['synced_to_server'] as int? ?? 0;
-        
-        if (lastMsgSynced == 0) {
-          // Last SQLite message is NOT synced - use stored server hash
-          // This ensures offline messages link to server's chain when syncing
-          previousHash = storedServerHash;
-          print('🔗 Using stored server hash (SQLite messages not synced yet): ${safeSubstring(storedServerHash, 10)}...');
+      // Determine previous_hash based on channel state
+      if (lastMessage.isNotEmpty) {
+        // Channel has messages - use last message's current_hash
+        final lastCurrentHash = lastMessage.first['current_hash'] as String?;
+        if (lastCurrentHash != null && lastCurrentHash.isNotEmpty && lastCurrentHash != '0') {
+          previousHash = lastCurrentHash;
+          isGenesis = false;
+          print('🔗 [CHAIN] Using last message current_hash as previous_hash: ${safeSubstring(previousHash, 16)}...');
         } else {
-          // Last SQLite message IS synced - use SQLite's last hash
-          // Chain continues from SQLite (messages already synced)
-          previousHash = lastMessage.first['current_hash'] as String? ?? '0';
-          print('🔗 Using SQLite hash (messages already synced): ${safeSubstring(previousHash, 10)}...');
+          // Last message has invalid hash - this is an error condition
+          print('❌ [GENESIS ERROR] Last message has invalid current_hash: ${lastCurrentHash ?? "null"}');
+          print('   Falling back to genesis (previous_hash = "0")');
+          previousHash = '0';
+          isGenesis = true;
         }
+      } else if (storedServerHash != null && storedServerHash.isNotEmpty && storedServerHash != '0') {
+        // No local messages but have server hash - link to server chain
+        previousHash = storedServerHash;
+        isGenesis = false;
+        print('🔗 [CHAIN] Using stored server hash as previous_hash: ${safeSubstring(storedServerHash, 16)}...');
+      } else {
+        // No messages and no server hash - this is genesis
+        previousHash = '0';
+        isGenesis = true;
+        print('🔗 [GENESIS] First message in channel (previous_hash = "0")');
+      }
+      
+      // CRITICAL VALIDATION: previous_hash must NEVER be null or empty
+      if (previousHash.isEmpty) {
+        print('❌ [CRYPTO ERROR] previous_hash is empty - cannot proceed');
+        return null;
+      }
+      
+      // For non-genesis, validate previous_hash format (should be 64-char hex)
+      if (!isGenesis && (previousHash.length != 64 || !RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(previousHash))) {
+        print('❌ [CRYPTO ERROR] Invalid previous_hash format: length=${previousHash.length}, value=${safeSubstring(previousHash, 32)}...');
+        print('   Expected: 64-char hex string');
+        return null;
       }
 
       // CRITICAL: Calculate payload_hash from PLAINTEXT message_text
@@ -980,30 +995,65 @@ class SQLiteService {
         messageData['iv'] = null;
       }
       
-      // CRITICAL: Validate all required fields are present before insert
-      // This ensures message is fully prepared with all crypto operations complete
+      // CRITICAL: STRICT VALIDATION - Block insertion if ANY crypto field is invalid
+      // This prevents chain integrity issues from incomplete or malformed messages
       if (hashVersion == 2) {
+        // Validation 1: payload_hash must be valid 64-char hex
         if (payloadHash.isEmpty) {
-          print('❌ [CRYPTO VALIDATION] payload_hash is empty - cannot insert v2 message');
+          print('❌ [CRYPTO VALIDATION FAILED] payload_hash is empty - BLOCKING INSERT');
           return null;
         }
+        if (payloadHash.length != 64 || !RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(payloadHash)) {
+          print('❌ [CRYPTO VALIDATION FAILED] Invalid payload_hash format: length=${payloadHash.length}');
+          print('   Expected: 64-char hex string');
+          return null;
+        }
+        
+        // Validation 2: encrypted_message must be present and non-empty
         if (encryptedMessage == null || encryptedMessage.isEmpty) {
-          print('❌ [CRYPTO VALIDATION] encrypted_message is missing - cannot insert v2 message');
+          print('❌ [CRYPTO VALIDATION FAILED] encrypted_message is missing - BLOCKING INSERT');
           return null;
         }
+        
+        // Validation 3: iv must be present and non-empty
         if (iv == null || iv.isEmpty) {
-          print('❌ [CRYPTO VALIDATION] iv is missing - cannot insert v2 message');
+          print('❌ [CRYPTO VALIDATION FAILED] iv is missing - BLOCKING INSERT');
           return null;
         }
-        if (currentHash.isEmpty) {
-          print('❌ [CRYPTO VALIDATION] current_hash is empty - cannot insert v2 message');
-          return null;
-        }
+        
+        // Validation 4: previous_hash must NEVER be null or empty
+        // - Genesis: previous_hash = "0" (exactly)
+        // - Chain: previous_hash = 64-char hex
         if (previousHash.isEmpty) {
-          print('⚠️ [CRYPTO VALIDATION] previous_hash is empty - using "0" for genesis');
-          previousHash = '0';
-          messageData['previous_hash'] = '0';
+          print('❌ [CRYPTO VALIDATION FAILED] previous_hash is empty - BLOCKING INSERT');
+          print('   Genesis messages must use previous_hash = "0" (not empty)');
+          return null;
         }
+        if (previousHash != '0') {
+          // Non-genesis: validate format
+          if (previousHash.length != 64 || !RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(previousHash)) {
+            print('❌ [CRYPTO VALIDATION FAILED] Invalid previous_hash format: length=${previousHash.length}');
+            print('   Expected: "0" for genesis OR 64-char hex for chain');
+            return null;
+          }
+        }
+        
+        // Validation 5: current_hash must be valid 64-char hex
+        if (currentHash.isEmpty) {
+          print('❌ [CRYPTO VALIDATION FAILED] current_hash is empty - BLOCKING INSERT');
+          return null;
+        }
+        if (currentHash.length != 64 || !RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(currentHash)) {
+          print('❌ [CRYPTO VALIDATION FAILED] Invalid current_hash format: length=${currentHash.length}');
+          print('   Expected: 64-char hex string');
+          return null;
+        }
+        
+        print('✅ [CRYPTO VALIDATION PASSED] All v2 fields valid');
+        print('   Genesis: ${previousHash == "0"}');
+        print('   Payload hash: ${safeSubstring(payloadHash, 16)}...');
+        print('   Previous hash: ${safeSubstring(previousHash, 16)}...');
+        print('   Current hash: ${safeSubstring(currentHash, 16)}...');
       }
       
       // Use conflictAlgorithm to handle race conditions gracefully
@@ -1576,6 +1626,22 @@ class SQLiteService {
         final currentHash = record['current_hash'] as String?;
         final recordPreviousHash = record['previous_hash'] as String?;
 
+        // CRITICAL VALIDATION: previous_hash must NEVER be null or empty
+        // - Genesis: previous_hash = "0" (exactly)
+        // - Chain: previous_hash = 64-char hex
+        if (recordPreviousHash == null || recordPreviousHash.isEmpty) {
+          return ChainVerificationResult.failure(
+            reason: 'invalid_previous_hash',
+            brokenAt: messageId,
+            details: {
+              'message_id': messageId,
+              'index': i + 1,
+              'error': 'previous_hash is null or empty (must be "0" for genesis or 64-char hex for chain)',
+              'expected_previous_hash': expectedPreviousHash,
+            },
+          );
+        }
+
         // Check 1: Verify previous hash matches expected
         if (recordPreviousHash != expectedPreviousHash) {
           return ChainVerificationResult.failure(
@@ -1585,7 +1651,7 @@ class SQLiteService {
               'message_id': messageId,
               'index': i + 1,
               'expected_previous_hash': expectedPreviousHash,
-              'found_previous_hash': recordPreviousHash ?? 'null',
+              'found_previous_hash': recordPreviousHash,
               'message': 'Previous hash does not match expected chain state',
             },
           );
@@ -1616,14 +1682,15 @@ class SQLiteService {
           final storedPayloadHash = record['payload_hash'] as String?;
           final storedMessageText = record['message_text'] as String?;
           
-          // Build dataForHash with EXACT same structure as insert
+          // Build dataForHash with EXACT same structure as insert (line 923-931)
+          // CRITICAL: Must match insert structure exactly for hash consistency
           final dataForHash = {
             'message_id': record['message_id'],
             'workspace_id': record['workspace_id'],
             'sender_address': record['sender_address'],
             'receiver_address': record['receiver_address'],
             'timestamp': record['timestamp'],
-            'previous_hash': expectedPreviousHash,
+            'previous_hash': expectedPreviousHash, // Use expectedPreviousHash (chain state)
           };
           
           // Add payload_hash or message_text based on hash version
@@ -1790,6 +1857,24 @@ class SQLiteService {
         final currentHash = msg['current_hash'] as String?;
         final recordPreviousHash = msg['previous_hash'] as String?;
 
+        // CRITICAL VALIDATION: previous_hash must NEVER be null or empty
+        // - Genesis: previous_hash = "0" (exactly)
+        // - Chain: previous_hash = 64-char hex
+        if (recordPreviousHash == null || recordPreviousHash.isEmpty) {
+          return ChainVerificationResult.failure(
+            reason: 'invalid_previous_hash',
+            brokenAt: messageId,
+            details: {
+              'workspace_id': workspaceId,
+              'channel_id': channelId,
+              'message_id': messageId,
+              'index': i + 1,
+              'error': 'previous_hash is null or empty (must be "0" for genesis or 64-char hex for chain)',
+              'expected_previous_hash': expectedPreviousHash,
+            },
+          );
+        }
+
         if (recordPreviousHash != expectedPreviousHash) {
           return ChainVerificationResult.failure(
             reason: 'previous_hash_mismatch',
@@ -1800,7 +1885,7 @@ class SQLiteService {
               'message_id': messageId,
               'index': i + 1,
               'expected_previous_hash': expectedPreviousHash,
-              'found_previous_hash': recordPreviousHash ?? 'null',
+              'found_previous_hash': recordPreviousHash,
             },
           );
         }
@@ -2437,6 +2522,10 @@ class SQLiteService {
   /// - payload_hash is calculated BEFORE encryption during insert
   /// - payload_hash MUST NEVER be derived from encrypted_message or iv
   /// - This function uses the stored payload_hash value (already calculated from plaintext)
+  /// 
+  /// CRITICAL CONSISTENCY RULE:
+  /// - Keys are sorted before JSON encoding to ensure consistent hash calculation
+  /// - This prevents hash mismatches due to JSON key ordering differences
   String _calculateHash(Map<String, dynamic> data, {int hashVersion = 1}) {
     // Create a copy of data for modification
     final dataToHash = Map<String, dynamic>.from(data);
@@ -2463,7 +2552,15 @@ class SQLiteService {
     }
     // For hash version 1, keep message_text (default behavior)
     
-    final jsonString = jsonEncode(dataToHash);
+    // CRITICAL: Sort keys before JSON encoding to ensure consistent hash calculation
+    // JSON key order is not guaranteed in Dart, so we must sort to prevent hash mismatches
+    final sortedKeys = dataToHash.keys.toList()..sort();
+    final sortedData = <String, dynamic>{};
+    for (final key in sortedKeys) {
+      sortedData[key] = dataToHash[key];
+    }
+    
+    final jsonString = jsonEncode(sortedData);
     final bytes = utf8.encode(jsonString);
     final digest = sha256.convert(bytes);
     return digest.toString();
