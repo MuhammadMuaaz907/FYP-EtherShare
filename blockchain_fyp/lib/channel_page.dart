@@ -74,6 +74,9 @@ class _ChannelPageState extends State<ChannelPage> {
   bool _isCheckingMessages = false;
   DateTime? _lastMessageCheckTime;
   
+  // Store callback reference for cleanup
+  Function(Map<String, dynamic>)? _p2pMessageCallback;
+  
   // Auto-scroll controller for messages list
   final ScrollController _scrollController = ScrollController();
   
@@ -115,11 +118,14 @@ class _ChannelPageState extends State<ChannelPage> {
   
   /// Set up real-time message updates (polling + P2P callbacks)
   void _setupRealTimeUpdates() {
-    // Set up P2P callback for real-time messages
-    P2PService.instance.onMessageReceived = (message) {
+    // Create P2P callback for real-time messages
+    _p2pMessageCallback = (message) {
       // Check if message is for current channel
       final messageChannelId = message['channel_id']?.toString() ?? '';
       final messageWorkspaceId = message['workspace_id']?.toString() ?? '';
+      
+      print('📨 P2P message callback triggered in channel: ${widget.channelName}');
+      print('   Message channel: $messageChannelId, workspace: $messageWorkspaceId');
       
       // Ensure workspace ID is resolved for comparison
       if (_workspaceId == null) {
@@ -131,6 +137,12 @@ class _ChannelPageState extends State<ChannelPage> {
       }
     };
     
+    // Add callback to P2P service (supports multiple listeners)
+    if (_p2pMessageCallback != null) {
+      P2PService.instance.addMessageReceivedCallback(_p2pMessageCallback!);
+      print('✅ Registered P2P message callback for channel: ${widget.channelName}');
+    }
+    
     // Start periodic polling for new messages (every 2 seconds)
     _messagePollingTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
       if (mounted && !_isCheckingMessages && !_isLoadingMessages) {
@@ -141,40 +153,61 @@ class _ChannelPageState extends State<ChannelPage> {
   
   /// Handle P2P message received callback
   void _handleP2PMessage(Map<String, dynamic> message) {
+    if (!mounted) {
+      print('⚠️ Channel page not mounted, ignoring P2P message');
+      return;
+    }
+    
     final messageChannelId = message['channel_id']?.toString() ?? '';
     final messageWorkspaceId = message['workspace_id']?.toString() ?? '';
     
     // Ensure workspace ID is resolved for comparison
     final effectiveWorkspaceId = _workspaceId ?? widget.workspaceName;
     
-    // Match by both workspace ID and workspace name (for backward compatibility)
-    final workspaceMatches = messageWorkspaceId == effectiveWorkspaceId || 
-                             messageWorkspaceId == widget.workspaceName ||
-                             effectiveWorkspaceId == messageWorkspaceId;
+    // Normalize for comparison (trim, lowercase)
+    final normalizedMessageChannelId = messageChannelId.toLowerCase().trim();
+    final normalizedCurrentChannelName = widget.channelName.toLowerCase().trim();
     
-    // Match channel (case-insensitive)
-    final channelMatches = messageChannelId.toLowerCase() == widget.channelName.toLowerCase();
+    // Match by both workspace ID and workspace name (for backward compatibility)
+    // Normalize workspace IDs for comparison
+    final normalizedMessageWorkspaceId = messageWorkspaceId.toLowerCase().trim();
+    final normalizedEffectiveWorkspaceId = effectiveWorkspaceId.toLowerCase().trim();
+    final normalizedWorkspaceName = widget.workspaceName.toLowerCase().trim();
+    
+    final workspaceMatches = normalizedMessageWorkspaceId == normalizedEffectiveWorkspaceId || 
+                             normalizedMessageWorkspaceId == normalizedWorkspaceName ||
+                             normalizedEffectiveWorkspaceId == normalizedMessageWorkspaceId ||
+                             messageWorkspaceId == effectiveWorkspaceId ||
+                             messageWorkspaceId == widget.workspaceName;
+    
+    // Match channel (case-insensitive, trimmed)
+    final channelMatches = normalizedMessageChannelId == normalizedCurrentChannelName ||
+                          messageChannelId == widget.channelName;
+    
+    print('🔍 Channel message matching check:');
+    print('   Message channel: "$messageChannelId" (normalized: "$normalizedMessageChannelId")');
+    print('   Current channel: "${widget.channelName}" (normalized: "$normalizedCurrentChannelName")');
+    print('   Message workspace: "$messageWorkspaceId" (normalized: "$normalizedMessageWorkspaceId")');
+    print('   Current workspace: "$effectiveWorkspaceId" (normalized: "$normalizedEffectiveWorkspaceId")');
+    print('   Workspace name: "${widget.workspaceName}" (normalized: "$normalizedWorkspaceName")');
+    print('   Channel match: $channelMatches, Workspace match: $workspaceMatches');
     
     if (channelMatches && workspaceMatches) {
-      print('📨 Real-time P2P message received for current channel');
-      print('   Message workspace: $messageWorkspaceId, Current workspace: $effectiveWorkspaceId');
-      print('   Message channel: $messageChannelId, Current channel: ${widget.channelName}');
+      print('✅ P2P message MATCHES current channel - triggering real-time update');
       print('   Message ID: ${message['message_id']}');
+      print('   Sender: ${message['sender_address']}');
       
       // Force immediate check for new messages (don't wait for polling)
       if (mounted && !_isCheckingMessages && !_isLoadingMessages) {
+        print('   🔄 Calling _checkForNewMessages() immediately...');
         _checkForNewMessages();
       } else {
         print('⚠️ Cannot check for new messages: mounted=$mounted, checking=$_isCheckingMessages, loading=$_isLoadingMessages');
       }
     } else {
-      print('⚠️ P2P message not for current channel/workspace');
-      print('   Message workspace: $messageWorkspaceId, Current: $effectiveWorkspaceId');
-      print('   Message channel: $messageChannelId, Current: ${widget.channelName}');
-      print('   Workspace match: $workspaceMatches, Channel match: $channelMatches');
+      print('⚠️ P2P message does NOT match current channel/workspace - ignoring');
+      print('   Channel match: $channelMatches, Workspace match: $workspaceMatches');
     }
-    
-    print('✅ Real-time message updates enabled (polling every 2s + P2P callbacks)');
   }
 
   /// Resolve workspace ID from workspace name
@@ -268,10 +301,12 @@ class _ChannelPageState extends State<ChannelPage> {
     _messagePollingTimer?.cancel();
     _messagePollingTimer = null;
     
-    // IMPORTANT: Don't set callback to null - let it be overwritten by next channel page
-    // OR set it back to HybridStorageService callback for server sync
-    // Setting to null breaks P2P message reception when channel page is closed
-    // P2PService.instance.onMessageReceived = null; // REMOVED - causes callback loss
+    // Remove P2P callback (cleanup)
+    if (_p2pMessageCallback != null) {
+      P2PService.instance.removeMessageReceivedCallback(_p2pMessageCallback!);
+      print('✅ Removed P2P message callback for channel: ${widget.channelName}');
+      _p2pMessageCallback = null;
+    }
     
     // Dispose scroll controller
     _scrollController.dispose();

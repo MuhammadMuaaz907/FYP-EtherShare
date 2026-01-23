@@ -27,10 +27,56 @@ class P2PService {
   int _myPort = 8080;
   bool _isServerRunning = false;
   
-  // Callbacks
-  Function(Map<String, dynamic>)? onMessageReceived;
+  // Callbacks - Changed to lists to support multiple listeners
+  final List<Function(Map<String, dynamic>)> _onMessageReceivedCallbacks = [];
   Function(String, bool)? onPeerStatusChanged;
   Function(Map<String, dynamic>)? onChannelCreated; // Callback for channel creation events
+  
+  // Legacy single callback support (for backward compatibility)
+  Function(Map<String, dynamic>)? get onMessageReceived => 
+    _onMessageReceivedCallbacks.isNotEmpty ? _onMessageReceivedCallbacks.first : null;
+  
+  set onMessageReceived(Function(Map<String, dynamic>)? callback) {
+    if (callback != null) {
+      // Add to list if not already present
+      if (!_onMessageReceivedCallbacks.contains(callback)) {
+        _onMessageReceivedCallbacks.add(callback);
+        print('✅ Added message received callback (total: ${_onMessageReceivedCallbacks.length})');
+      }
+    }
+  }
+  
+  /// Add a message received callback (recommended way)
+  void addMessageReceivedCallback(Function(Map<String, dynamic>) callback) {
+    if (!_onMessageReceivedCallbacks.contains(callback)) {
+      _onMessageReceivedCallbacks.add(callback);
+      print('✅ Added message received callback (total: ${_onMessageReceivedCallbacks.length})');
+    }
+  }
+  
+  /// Remove a message received callback
+  void removeMessageReceivedCallback(Function(Map<String, dynamic>) callback) {
+    _onMessageReceivedCallbacks.remove(callback);
+    print('✅ Removed message received callback (remaining: ${_onMessageReceivedCallbacks.length})');
+  }
+  
+  /// Notify all message received callbacks
+  void _notifyMessageReceived(Map<String, dynamic> message) {
+    if (_onMessageReceivedCallbacks.isEmpty) {
+      print('⚠️ No message received callbacks registered - message will not trigger UI update');
+      print('   💡 Message is saved to SQLite, will appear on next poll or page reload');
+      return;
+    }
+    
+    print('📢 Notifying ${_onMessageReceivedCallbacks.length} message received callback(s)');
+    for (final callback in _onMessageReceivedCallbacks) {
+      try {
+        callback(message);
+      } catch (e) {
+        print('❌ Error in message received callback: $e');
+      }
+    }
+  }
 
   /// Get current IP address
   Future<String?> getMyIpAddress() async {
@@ -356,7 +402,13 @@ class P2PService {
 
     // Handle channel messages (broadcast to all members)
     if (messageType == 'channel_message' && channelId != null && workspaceId != null) {
-      print('📢 Received channel message: $channelId in workspace $workspaceId from $senderAddress');
+      print('📢 ========== CHANNEL MESSAGE RECEIVED ==========');
+      print('   Channel ID: $channelId');
+      print('   Workspace ID: $workspaceId');
+      print('   Sender: $senderAddress');
+      print('   Message ID: $messageId');
+      print('   Content preview: ${content.length > 50 ? content.substring(0, 50) + "..." : content}');
+      print('===============================================');
       
       // Check if message already exists (deduplication) - async check
       _checkDuplicateMessage(
@@ -398,8 +450,10 @@ class P2PService {
 
         if (saved != null) {
           print('✅ Channel message saved to SQLite: $messageId');
+          print('   SQLite message ID: $saved');
         } else {
-          print('⚠️ Failed to save channel message to SQLite: $messageId');
+          print('❌ FAILED to save channel message to SQLite: $messageId');
+          print('   This is a critical error - message will not be visible!');
         }
 
         // Send acknowledgment
@@ -409,18 +463,16 @@ class P2PService {
           'status': 'received',
           'timestamp': DateTime.now().millisecondsSinceEpoch,
         });
+        print('✅ Sent acknowledgment to sender');
 
-        // Notify callback (for UI updates) - IMPORTANT: Call after saving to SQLite
-        if (onMessageReceived != null) {
-          print('📢 Triggering onMessageReceived callback for message: $messageId');
-          print('   Workspace: $workspaceId, Channel: $channelId');
-          onMessageReceived!(message);
-        } else {
-          print('⚠️ onMessageReceived callback is null - UI will not update automatically');
-          print('   💡 Message is saved to SQLite, will appear on next poll or page reload');
-        }
+        // Notify all callbacks (for UI updates) - IMPORTANT: Call after saving to SQLite
+        print('📢 Triggering message received callbacks for message: $messageId');
+        print('   Workspace: $workspaceId, Channel: $channelId');
+        print('   Registered callbacks: ${_onMessageReceivedCallbacks.length}');
+        _notifyMessageReceived(message);
 
         print('✅ Channel message received and processed: $messageId');
+        print('===============================================');
       }).catchError((e) {
         print('❌ Error handling channel message: $e');
       });
@@ -456,8 +508,8 @@ class P2PService {
         'timestamp': DateTime.now().millisecondsSinceEpoch,
       });
 
-      // Notify callback
-      onMessageReceived?.call(message);
+      // Notify all callbacks
+      _notifyMessageReceived(message);
 
       print('✅ Message received and saved: $messageId');
     }
@@ -846,7 +898,14 @@ class P2PService {
         'timestamp': DateTime.now().millisecondsSinceEpoch,
       };
 
-      print('   Message details: workspace=$workspaceId, channel=$channelId, content=${content.substring(0, content.length > 50 ? 50 : content.length)}...');
+      print('📤 ========== SENDING CHANNEL MESSAGE ==========');
+      print('   To receiver: $receiverAddress');
+      print('   Workspace ID: $workspaceId');
+      print('   Channel ID: $channelId');
+      print('   Message ID: $finalMessageId');
+      print('   Content preview: ${content.length > 50 ? content.substring(0, 50) + "..." : content}');
+      print('   Peer ID: $peerId');
+      print('===============================================');
 
       // Send message
       _sendToPeer(peerId, message);
