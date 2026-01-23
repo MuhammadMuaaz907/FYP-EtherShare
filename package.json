@@ -8,8 +8,8 @@
     "test": "test"
   },
   "scripts": {
-    "start": "node backend/server.js",
-    "dev": "nodemon backend/server.js",
+    "start": "node init && node backend/server.js",
+    "dev": "node init && nodemon backend/server.js",
     "tcp-server": "node backend/tcp-server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

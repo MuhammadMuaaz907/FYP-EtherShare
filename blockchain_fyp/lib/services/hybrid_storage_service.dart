@@ -585,6 +585,15 @@ class HybridStorageService {
     required String messageText,
     String? fileId,
   }) async {
+    print('📨 ========== ADD MESSAGE CALLED ==========');
+    print('   Workspace ID: $workspaceId');
+    print('   Channel ID: $channelId');
+    print('   Sender: $senderAddress');
+    print('   Receiver: $receiverAddress');
+    print('   Message length: ${messageText.length}');
+    print('   Server online: $_isServerOnline');
+    print('===========================================');
+    
     // CRITICAL: Determine message state based on server status
     // If server is online, mark as ONLINE_CONFIRMED
     // If server is offline, mark as OFFLINE_LOCAL (will be changed to PENDING_SYNC when syncing)
@@ -602,19 +611,40 @@ class HybridStorageService {
     );
 
     if (messageId == null) {
+      print('❌ Failed to save message to SQLite');
       return null;
     }
+    
+    print('✅ Message saved to SQLite with ID: $messageId');
 
     // ALWAYS try P2P communication for channel messages (works even when server is off)
     // For direct messages: send to specific receiver
     // For channel messages: broadcast to all workspace members
     if (channelId != null) {
       // Channel message: ALWAYS broadcast via P2P (even if server is online or offline)
-      print('📡 Broadcasting channel message via P2P to workspace members...');
+      print('📡 ========== P2P BROADCAST START ==========');
+      print('   Channel ID: $channelId');
+      print('   Workspace ID: $workspaceId');
+      print('   Message ID: $messageId');
+      print('   P2P Server Running: ${P2PService.instance.isServerRunning()}');
+      print('   My IP: ${P2PService.instance.getMyIp()}, Port: ${P2PService.instance.getMyPort()}');
+      print('===========================================');
+      
       try {
         // Get workspace members (from server if online, from SQLite if offline)
         final members = await getWorkspaceMembers(workspaceId);
+        print('📡 Broadcasting channel message via P2P to workspace members...');
         print('   Found ${members.length} workspace members for P2P broadcast');
+        
+        if (members.isEmpty) {
+          print('   ❌ CRITICAL: No workspace members found - P2P broadcast cannot proceed');
+          print('   💡 Tip: Make sure workspace members are cached to SQLite');
+          print('   💡 Message is already saved to SQLite, will sync when server comes back');
+          // Message is already saved to SQLite, so we can continue
+          // P2P broadcast will work once members are cached
+        } else {
+          print('   ✅ Workspace members found: ${members.map((m) => m['member_address']?.toString() ?? 'unknown').join(", ")}');
+        }
         
         if (members.isEmpty) {
           print('   ⚠️ No workspace members found - P2P broadcast cannot proceed');
@@ -713,14 +743,24 @@ class HybridStorageService {
           }
         }
         
+        print('📡 ========== P2P BROADCAST SUMMARY ==========');
+        print('   Attempted: $attemptedCount members');
+        print('   Successful: $successCount members');
+        print('   Failed: ${attemptedCount - successCount} members');
+        
         if (successCount > 0) {
           print('✅ Channel message broadcasted to $successCount/$attemptedCount members via P2P');
         } else if (attemptedCount > 0) {
-          print('⚠️ No P2P connections available for channel broadcast (attempted: $attemptedCount)');
+          print('❌ CRITICAL: No P2P connections available for channel broadcast (attempted: $attemptedCount)');
           print('   💡 Tip: Make sure peers are on same network and have P2P server running');
+          print('   💡 Tip: Check if peer info is in SQLite for all workspace members');
+        } else {
+          print('⚠️ No members to broadcast to (all members skipped or no members found)');
         }
-      } catch (e) {
-        print('⚠️ P2P broadcast error: $e');
+        print('===========================================');
+      } catch (e, stackTrace) {
+        print('❌ CRITICAL P2P broadcast error: $e');
+        print('   Stack trace: $stackTrace');
       }
     } else if (receiverAddress != null && receiverAddress.isNotEmpty) {
       // Direct message: send to specific receiver (works even when server is off)

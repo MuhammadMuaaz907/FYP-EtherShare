@@ -3,9 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:get_it/get_it.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'services/distributed_service.dart';
+import 'services/distributed_service.dart' show DistributedService, ChainBrokenException;
 import 'services/hybrid_storage_service.dart';
 import 'services/session_service.dart';
+import 'services/p2p_service.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -67,9 +68,23 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
   List<double> _waveformData = [];
   Offset? _panStartPosition;
 
+  // Real-time message updates (like channels)
+  Timer? _messagePollingTimer;
+  bool _isCheckingMessages = false;
+  bool _isLoadingMessages = false;
+  
+  // Workspace ID (resolved from workspace name) - like channels
+  String? _workspaceId;
+  
+  /// Get workspace ID (resolved from workspace name)
+  String get _effectiveWorkspaceId {
+    return _workspaceId ?? widget.workspaceName;
+  }
+
   @override
   void initState() {
     super.initState();
+    _resolveWorkspaceId(); // Resolve workspace ID first (like channels)
     _loadUserNameAndMessages();
     _textListener = () {
       setState(() {
@@ -77,10 +92,17 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
       });
     };
     _messageController.addListener(_textListener);
+    
+    // Set up real-time message updates (like channels)
+    _setupRealTimeUpdates();
   }
 
   @override
   void dispose() {
+    // Cancel real-time update timer
+    _messagePollingTimer?.cancel();
+    _messagePollingTimer = null;
+    
     _messageController.removeListener(_textListener);
     _messageController.dispose();
     _fileCache.clear();
@@ -114,20 +136,257 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
     }
   }
 
-  Future<void> _checkForNewMessages() async {
+  /// Set up real-time message updates (polling + P2P callbacks) - like channels
+  void _setupRealTimeUpdates() {
+    // Set up P2P callback for real-time messages
+    P2PService.instance.onMessageReceived = (message) {
+      // Check if message is for current DM conversation
+      final messageType = message['type']?.toString() ?? '';
+      
+      // Only handle direct messages (not channel messages)
+      if (messageType == 'message') {
+        // Ensure user address is loaded
+        if (userAddress == null) {
+          _loadUserAddress().then((_) {
+            _handleP2PMessage(message);
+          });
+        } else {
+          _handleP2PMessage(message);
+        }
+      }
+    };
+    
+    // Start periodic polling for new messages (every 2 seconds) - like channels
+    _messagePollingTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (mounted && !_isCheckingMessages && !_isLoadingMessages) {
+        _checkForNewMessages();
+      }
+    });
+    
+    print('✅ Real-time DM message updates enabled (polling every 2s + P2P callbacks)');
+  }
+  
+  /// Resolve workspace ID from workspace name (like channels)
+  Future<void> _resolveWorkspaceId() async {
     try {
       if (userAddress == null) {
         await _loadUserAddress();
       }
-      if (userAddress == null) return;
+      
+      if (userAddress == null) {
+        print('⚠️ Cannot resolve workspace ID: user address is null');
+        _workspaceId = widget.workspaceName; // Fallback to name
+        return;
+      }
+      
+      print('🔍 Resolving workspace ID for workspace name: ${widget.workspaceName}');
+      
+      // Try to get workspace ID from SQLite first (works offline)
+      final sqliteWorkspaces = await HybridStorageService.instance.getUserWorkspaces(userAddress!);
+      final sqliteWorkspace = sqliteWorkspaces.firstWhere(
+        (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+        orElse: () => {},
+      );
+      
+      if (sqliteWorkspace.isNotEmpty) {
+        _workspaceId = sqliteWorkspace['workspace_id']?.toString() ?? 
+                      sqliteWorkspace['workspaceId']?.toString() ??
+                      widget.workspaceName;
+        print('✅ Resolved workspace ID from SQLite: $_workspaceId');
+        return;
+      }
+      
+      // If not in SQLite, try server (if online)
+      try {
+        final serverWorkspaces = await DistributedService.getUserWorkspaces(userAddress!);
+        final serverWorkspace = serverWorkspaces.firstWhere(
+          (w) => (w['name']?.toString() ?? w['workspaceName']?.toString()) == widget.workspaceName,
+          orElse: () => {},
+        );
+        
+        if (serverWorkspace.isNotEmpty) {
+          _workspaceId = serverWorkspace['workspace_id']?.toString() ?? 
+                        serverWorkspace['workspaceId']?.toString() ??
+                        widget.workspaceName;
+          print('✅ Resolved workspace ID from server: $_workspaceId');
+          return;
+        }
+      } catch (e) {
+        print('⚠️ Could not resolve workspace ID from server: $e');
+      }
+      
+      // Fallback to workspace name (might be the ID already)
+      _workspaceId = widget.workspaceName;
+      print('⚠️ Using workspace name as ID (fallback): $_workspaceId');
+    } catch (e) {
+      print('❌ Error resolving workspace ID: $e');
+      _workspaceId = widget.workspaceName; // Fallback
+    }
+  }
+  
+  /// Get consistent message ID from message map (like channels)
+  String? _getMessageId(Map<String, dynamic> msg) {
+    // Try message_id first (most reliable)
+    final messageId = msg['message_id']?.toString();
+    if (messageId != null && messageId.isNotEmpty) {
+      return messageId;
+    }
+    
+    // Try id as fallback
+    final id = msg['id']?.toString();
+    if (id != null && id.isNotEmpty) {
+      return id;
+    }
+    
+    // Generate composite ID from timestamp, sender, and content (last resort)
+    final timestamp = msg['timestamp'];
+    final sender = msg['userAddress']?.toString() ?? 
+                   msg['sender_address']?.toString() ?? 
+                   msg['senderAddress']?.toString() ?? '';
+    final content = (msg['content']?.toString() ?? 
+                    msg['message_text']?.toString() ?? 
+                    msg['messageText']?.toString() ?? '').trim();
+    
+    if (timestamp != null && sender.isNotEmpty && content.isNotEmpty) {
+      final timestampStr = timestamp is DateTime 
+          ? timestamp.millisecondsSinceEpoch.toString()
+          : (timestamp is int ? timestamp.toString() : timestamp.toString());
+      return '${timestampStr}_${sender}_${content.substring(0, content.length > 50 ? 50 : content.length)}';
+    }
+    
+    return null;
+  }
+  
+  /// Handle P2P message received callback - filters for current DM conversation
+  void _handleP2PMessage(Map<String, dynamic> message) {
+    if (userAddress == null) return;
+    
+    final senderAddress = message['sender_address']?.toString().toLowerCase().trim() ?? '';
+    final receiverAddress = message['receiver_address']?.toString().toLowerCase().trim() ?? '';
+    final messageWorkspaceId = message['workspace_id']?.toString() ?? '';
+    final currentUserAddress = userAddress!.toLowerCase().trim();
+    final memberAddress = widget.memberAddress.toLowerCase().trim();
+    final currentWorkspaceName = widget.workspaceName;
+    
+    // Check if message is for this DM conversation
+    // Message should be between current user and member
+    final isForThisDM = (senderAddress == currentUserAddress && receiverAddress == memberAddress) ||
+                        (senderAddress == memberAddress && receiverAddress == currentUserAddress);
+    
+    // Also check workspace (security: only show messages from current workspace)
+    final workspaceMatches = messageWorkspaceId.isEmpty || 
+                             messageWorkspaceId == currentWorkspaceName ||
+                             currentWorkspaceName == messageWorkspaceId;
+    
+    if (isForThisDM && workspaceMatches) {
+      print('📨 Real-time P2P DM message received for current conversation');
+      print('   From: $senderAddress, To: $receiverAddress');
+      print('   Workspace: $messageWorkspaceId, Current: $currentWorkspaceName');
+      print('   Message ID: ${message['message_id']}');
+      
+      // Force immediate check for new messages (don't wait for polling)
+      if (mounted && !_isCheckingMessages && !_isLoadingMessages) {
+        _checkForNewMessages();
+      } else {
+        print('⚠️ Cannot check for new messages: mounted=$mounted, checking=$_isCheckingMessages, loading=$_isLoadingMessages');
+      }
+    } else {
+      print('⚠️ P2P message not for current DM conversation');
+      print('   From: $senderAddress, To: $receiverAddress');
+      print('   Current user: $currentUserAddress, Member: $memberAddress');
+      print('   Workspace: $messageWorkspaceId, Current: $currentWorkspaceName');
+      print('   DM match: $isForThisDM, Workspace match: $workspaceMatches');
+    }
+  }
+
+  Future<void> _checkForNewMessages() async {
+    // Prevent multiple simultaneous checks (like channels)
+    if (_isCheckingMessages || !mounted) {
+      return;
+    }
+    
+    _isCheckingMessages = true;
+    
+    try {
+      // Ensure workspace ID is resolved
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      
+      if (userAddress == null) {
+        await _loadUserAddress();
+      }
+      if (userAddress == null) {
+        _isCheckingMessages = false;
+        return;
+      }
+
+      // CRITICAL: For polling, only fetch NEW messages (incremental loading) - like channels
+      // Calculate last message timestamp to only fetch messages after that
+      int? sinceTimestamp;
+      if (_messages.isNotEmpty) {
+        // Get timestamp of last message
+        final lastMessage = _messages.last;
+        final lastTimestamp = lastMessage['timestamp'];
+        
+        if (lastTimestamp is DateTime) {
+          sinceTimestamp = lastTimestamp.millisecondsSinceEpoch;
+        } else if (lastTimestamp is int) {
+          sinceTimestamp = lastTimestamp;
+        } else if (lastTimestamp is String) {
+          final parsed = DateTime.tryParse(lastTimestamp);
+          if (parsed != null) {
+            sinceTimestamp = parsed.millisecondsSinceEpoch;
+          }
+        }
+        
+        if (sinceTimestamp != null) {
+          print('🔄 Polling: Only fetching DM messages after ${DateTime.fromMillisecondsSinceEpoch(sinceTimestamp)}');
+        }
+      }
 
       // Use HybridStorageService (works offline)
+      // Note: getDirectMessages doesn't support sinceTimestamp yet, but we'll filter client-side
       List<Map<String, dynamic>> loaded = await HybridStorageService.instance.getDirectMessages(
         user1Address: userAddress!,
         user2Address: widget.memberAddress,
       );
 
-      for (var msg in loaded) {
+      // Filter by timestamp if sinceTimestamp is set
+      if (sinceTimestamp != null) {
+        final sinceTime = sinceTimestamp; // Capture for closure
+        loaded = loaded.where((msg) {
+          final msgTimestamp = msg['timestamp'];
+          int msgTime = 0;
+          if (msgTimestamp is DateTime) {
+            msgTime = msgTimestamp.millisecondsSinceEpoch;
+          } else if (msgTimestamp is int) {
+            msgTime = msgTimestamp;
+          } else if (msgTimestamp is String) {
+            final parsed = DateTime.tryParse(msgTimestamp);
+            if (parsed != null) {
+              msgTime = parsed.millisecondsSinceEpoch;
+            }
+          }
+          return msgTime > sinceTime;
+        }).toList();
+      }
+
+      // PHASE 4: Filter out SYNCED messages - they should NOT appear in real-time updates
+      // SYNCED messages are already in UI from initial load, don't re-add them
+      final realTimeMessages = loaded.where((msg) {
+        final state = msg['message_state']?.toString();
+        // Only show real-time messages: ONLINE_CONFIRMED, OFFLINE_LOCAL, PENDING_SYNC
+        // Exclude SYNCED (those are from sync, not real-time)
+        return state != 'SYNCED';
+      }).toList();
+      
+      if (realTimeMessages.length < loaded.length) {
+        print('🚫 PHASE 4: Filtered out ${loaded.length - realTimeMessages.length} SYNCED messages (not real-time)');
+      }
+
+      // Transform timestamps
+      for (var msg in realTimeMessages) {
         if (msg['timestamp'] is String) {
           msg['timestamp'] = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
         } else if (msg['timestamp'] is int) {
@@ -135,15 +394,163 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
         }
       }
 
-      if (loaded.length != _messages.length) {
+      // Use proper deduplication instead of length comparison (like channels)
+      final existingMessageIds = _messages.map((m) => _getMessageId(m)).whereType<String>().toSet();
+      
+      // Also check for temporary message IDs that need to be replaced with real IDs
+      final tempMessageIds = _messages
+          .where((m) {
+            final id = _getMessageId(m);
+            return id != null && id.toString().startsWith('temp_');
+          })
+          .map((m) => _getMessageId(m))
+          .whereType<String>()
+          .toList();
+      
+      // Get current user address to filter out user's own messages
+      final currentUserAddress = userAddress!.toLowerCase();
+      
+      // Find new REAL-TIME messages (not already in _messages)
+      final newMessages = <Map<String, dynamic>>[];
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final recentThreshold = 30000; // 30 seconds - exclude user's own recent messages
+      
+      for (final msg in realTimeMessages) {
+        final msgId = _getMessageId(msg);
+        if (msgId == null) continue;
+        
+        // Skip if message ID already exists in UI
+        if (existingMessageIds.contains(msgId)) {
+          continue;
+        }
+        
+        // Get message details for deduplication
+        final msgContent = (msg['content']?.toString() ?? 
+                         msg['message_text']?.toString() ?? 
+                         msg['messageText']?.toString() ?? '').trim();
+        final msgSender = (msg['sender_address']?.toString() ?? 
+                        msg['senderAddress']?.toString() ?? 
+                        msg['userAddress']?.toString() ?? '').toLowerCase();
+        final msgTimestamp = msg['timestamp'] is DateTime 
+            ? (msg['timestamp'] as DateTime).millisecondsSinceEpoch 
+            : (msg['timestamp'] is int ? msg['timestamp'] as int : 0);
+        
+        // Exclude user's own messages that were sent very recently (within last 30 seconds)
+        // This prevents user's own messages from appearing again via polling
+        if (currentUserAddress.isNotEmpty && 
+            msgSender == currentUserAddress && 
+            msgTimestamp > 0 && 
+            (now - msgTimestamp) < recentThreshold) {
+          print('🚫 Skipping user\'s own recent message (sent ${(now - msgTimestamp) / 1000}s ago): $msgId');
+          continue;
+        }
+        
+        // Check if this message matches a temporary message (same content, sender, timestamp)
+        bool replacedTemp = false;
+        if (tempMessageIds.isNotEmpty && msgContent.isNotEmpty && msgSender.isNotEmpty) {
+          for (int i = 0; i < _messages.length; i++) {
+            final existingMsg = _messages[i];
+            final existingId = _getMessageId(existingMsg);
+            if (existingId != null && existingId.toString().startsWith('temp_')) {
+              final existingContent = (existingMsg['content']?.toString() ?? 
+                                     existingMsg['message_text']?.toString() ?? 
+                                     existingMsg['messageText']?.toString() ?? '').trim();
+              final existingSender = (existingMsg['userAddress']?.toString() ?? 
+                                     existingMsg['sender_address']?.toString() ?? 
+                                     existingMsg['senderAddress']?.toString() ?? '').toLowerCase();
+              final existingTimestamp = existingMsg['timestamp'] is DateTime 
+                  ? (existingMsg['timestamp'] as DateTime).millisecondsSinceEpoch 
+                  : (existingMsg['timestamp'] is int ? existingMsg['timestamp'] as int : 0);
+              
+              // Match if content, sender, and timestamp are close (within 5 seconds)
+              if (existingContent == msgContent && 
+                  existingSender == msgSender &&
+                  (existingTimestamp - msgTimestamp).abs() < 5000) {
+                // Replace temporary message with real one
+                setState(() {
+                  _messages[i] = {
+                    ...msg,
+                    'timestamp': msg['timestamp'] is DateTime ? msg['timestamp'] : DateTime.fromMillisecondsSinceEpoch(msgTimestamp),
+                  };
+                });
+                replacedTemp = true;
+                print('✅ Replaced temporary message $existingId with real message $msgId');
+                break;
+              }
+            }
+          }
+        }
+        
+        if (!replacedTemp) {
+          // Transform message format for UI
+          final transformedMsg = {
+            ...msg,
+            'type': msg['type'] ?? 'text',
+            'content': msgContent.isNotEmpty ? msgContent : (msg['encrypted_message'] != null ? '[Encrypted]' : ''),
+            'timestamp': msg['timestamp'] is DateTime ? msg['timestamp'] : DateTime.fromMillisecondsSinceEpoch(msgTimestamp),
+            'userAddress': msgSender,
+            'senderAddress': msgSender,
+            'senderName': msg['senderName'] ?? currentUserName,
+          };
+          newMessages.add(transformedMsg);
+        }
+      }
+      
+      if (newMessages.isNotEmpty) {
+        setState(() {
+          _messages.addAll(newMessages);
+          // Sort by timestamp
+          _messages.sort((a, b) {
+            final aTime = a['timestamp'] is DateTime 
+                ? (a['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (a['timestamp'] is int ? a['timestamp'] as int : 0);
+            final bTime = b['timestamp'] is DateTime 
+                ? (b['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (b['timestamp'] is int ? b['timestamp'] as int : 0);
+            return aTime.compareTo(bTime);
+          });
+        });
+        print('✅ Real-time update: Added ${newMessages.length} new DM messages to UI');
+      }
+      
+      // CRITICAL: ALWAYS perform final deduplication pass (even if no new messages)
+      final finalMessageIds = <String>{};
+      final deduplicatedMessages = <Map<String, dynamic>>[];
+      for (final msg in _messages) {
+        final msgId = _getMessageId(msg);
+        if (msgId != null && !finalMessageIds.contains(msgId)) {
+          deduplicatedMessages.add(msg);
+          finalMessageIds.add(msgId);
+        } else if (msgId != null) {
+          print('⚠️ Duplicate detected and removed: $msgId');
+        }
+      }
+      
+      // Always update _messages with deduplicated list
+      if (deduplicatedMessages.length != _messages.length) {
+        print('⚠️ Final deduplication: removed ${_messages.length - deduplicatedMessages.length} duplicates');
         setState(() {
           _messages.clear();
-          _messages.addAll(loaded);
+          _messages.addAll(deduplicatedMessages);
+          _messages.sort((a, b) {
+            final aTime = a['timestamp'] is DateTime 
+                ? (a['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (a['timestamp'] is int ? a['timestamp'] as int : 0);
+            final bTime = b['timestamp'] is DateTime 
+                ? (b['timestamp'] as DateTime).millisecondsSinceEpoch 
+                : (b['timestamp'] is int ? b['timestamp'] as int : 0);
+            return aTime.compareTo(bTime);
+          });
         });
-        // _preloadMediaFiles(loaded);
       }
+    } on ChainBrokenException catch (e) {
+      // Chain broken - don't update messages, but don't crash
+      print('⚠️ Chain integrity compromised during real-time update - skipping message update');
+      print('   Broken at: ${e.brokenAt}');
     } catch (e) {
       print('❌ Error checking for new messages: $e');
+    } finally {
+      _isCheckingMessages = false;
     }
   }
 
@@ -185,37 +592,120 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
   }
 
   Future<void> _loadMessages() async {
+    // Prevent multiple simultaneous loads (like channels)
+    if (_isLoadingMessages) {
+      print('⚠️ Messages already loading, skipping...');
+      return;
+    }
+
+    // Check if widget is still mounted before setting state
+    if (!mounted) {
+      print('⚠️ Widget not mounted, skipping message load');
+      return;
+    }
+
+    setState(() {
+      _isLoadingMessages = true;
+    });
+
     try {
+      print('📥 Loading DM messages for member: ${widget.memberAddress} in workspace: ${widget.workspaceName}');
+      
+      // Ensure workspace ID is resolved
+      if (_workspaceId == null) {
+        await _resolveWorkspaceId();
+      }
+      
       if (userAddress == null) {
         await _loadUserAddress();
       }
       if (userAddress == null) {
-        setState(() {
-          status = 'User address not found';
-        });
+        if (mounted) {
+          setState(() {
+            status = 'User address not found';
+            _isLoadingMessages = false;
+          });
+        }
         return;
       }
 
-      // Use HybridStorageService (works offline)
-      List<Map<String, dynamic>> loaded = await HybridStorageService.instance.getDirectMessages(
+      // Use HybridStorageService (works offline) - like channels
+      final loaded = await HybridStorageService.instance.getDirectMessages(
         user1Address: userAddress!,
         user2Address: widget.memberAddress,
       );
+
+      print('✅ Loaded ${loaded.length} DM messages from database');
+      
+      // Transform database format to UI format (like channels)
+      final transformedMessages = <Map<String, dynamic>>[];
       
       for (var msg in loaded) {
-        if (msg['timestamp'] is String) {
-          msg['timestamp'] = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
+        // Transform timestamp
+        DateTime messageTime;
+        if (msg['timestamp'] is DateTime) {
+          messageTime = msg['timestamp'] as DateTime;
         } else if (msg['timestamp'] is int) {
-          msg['timestamp'] = DateTime.fromMillisecondsSinceEpoch(msg['timestamp']);
+          messageTime = DateTime.fromMillisecondsSinceEpoch(msg['timestamp'] as int);
+        } else if (msg['timestamp'] is String) {
+          messageTime = DateTime.tryParse(msg['timestamp']) ?? DateTime.now();
+        } else {
+          messageTime = DateTime.now();
         }
+        
+        // Get message content (decrypted if needed)
+        final content = msg['content']?.toString() ?? 
+                       msg['message_text']?.toString() ?? 
+                       msg['messageText']?.toString() ?? 
+                       (msg['encrypted_message'] != null ? '[Encrypted]' : '');
+        
+        // Get sender address
+        final senderAddress = (msg['sender_address']?.toString() ?? 
+                              msg['senderAddress']?.toString() ?? 
+                              msg['userAddress']?.toString() ?? '').toLowerCase().trim();
+        
+        // Determine if message is sent by current user
+        final isSent = senderAddress == userAddress!.toLowerCase().trim();
+        
+        // Transform to UI format
+        transformedMessages.add({
+          'message_id': msg['message_id'] ?? msg['id'],
+          'id': msg['message_id'] ?? msg['id'],
+          'type': msg['type'] ?? 'text',
+          'content': content,
+          'message_text': content,
+          'messageText': content,
+          'timestamp': messageTime,
+          'sender_address': senderAddress,
+          'senderAddress': senderAddress,
+          'userAddress': senderAddress,
+          'receiver_address': msg['receiver_address']?.toString() ?? 
+                             msg['receiverAddress']?.toString(),
+          'receiverAddress': msg['receiver_address']?.toString() ?? 
+                            msg['receiverAddress']?.toString(),
+          'senderName': isSent ? currentUserName : widget.memberDisplayName,
+          'workspace_id': msg['workspace_id'] ?? _effectiveWorkspaceId,
+          'message_state': msg['message_state'] ?? msg['state'],
+        });
       }
       
-      setState(() {
-        _messages.clear();
-        _messages.addAll(loaded);
+      // Sort by timestamp
+      transformedMessages.sort((a, b) {
+        final aTime = (a['timestamp'] as DateTime).millisecondsSinceEpoch;
+        final bTime = (b['timestamp'] as DateTime).millisecondsSinceEpoch;
+        return aTime.compareTo(bTime);
       });
+      
+      if (mounted) {
+        setState(() {
+          _messages.clear();
+          _messages.addAll(transformedMessages);
+          _isLoadingMessages = false;
+        });
+        print('✅ Displayed ${transformedMessages.length} DM messages in UI');
+      }
 
-      // _preloadMediaFiles(loaded);
+      // _preloadMediaFiles(transformedMessages);
     } on ChainBrokenException catch (e) {
       // Chain integrity compromised - hide all messages and show error
       print('❌ Chain integrity compromised: ${e.message}');
@@ -249,6 +739,13 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
       if (mounted) {
         setState(() {
           status = 'Failed to load messages: $e';
+          _isLoadingMessages = false;
+        });
+      }
+    } finally {
+      if (mounted && _isLoadingMessages) {
+        setState(() {
+          _isLoadingMessages = false;
         });
       }
     }
@@ -270,51 +767,73 @@ class _DirectMessagePageState extends State<DirectMessagePage> {
     for (int i = 0; i < mediaCids.length; i += 5) {
       final batch = mediaCids.sublist(i, i + 5 > mediaCids.length ? mediaCids.length : i + 5);
       for (var cid in batch) {
-        _getCachedFile(cid).catchError((e) => print('Preload error: $e'));
+        _getCachedFile(cid).catchError((e) {
+          print('Preload error: $e');
+          return null;
+        });
       }
     }
   }
 
   void _sendMessage() async {
-    if (_messageController.text.trim().isNotEmpty) {
-      if (userAddress == null) {
-        await _loadUserAddress();
-      }
-      if (userAddress == null) return;
-      
-      final msg = {
-        'type': 'text',
-        'content': _messageController.text.trim(),
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-        'senderName': currentUserName,
-        'sender': currentUserName,
-        'userAddress': userAddress ?? '',
-      };
-      
+    if (_messageController.text.trim().isEmpty) return;
+
+    if (userAddress == null) await _loadUserAddress();
+    if (userAddress == null) return;
+    
+    // Ensure workspace ID is resolved
+    if (_workspaceId == null) {
+      await _resolveWorkspaceId();
+    }
+
+    final messageText = _messageController.text.trim();
+    _messageController.clear();
+
+    // Generate temporary message ID for local display (will be replaced by server message_id) - like channels
+    final tempMessageId = 'temp_${DateTime.now().millisecondsSinceEpoch}_${userAddress}';
+    final timestamp = DateTime.now();
+
+    final msg = {
+      'type': 'text',
+      'content': messageText,
+      'timestamp': timestamp,
+      'senderName': currentUserName,
+      'userAddress': userAddress ?? '',
+      'workspace': widget.workspaceName,
+      'message_id': tempMessageId, // Temporary ID for deduplication
+    };
+
+    // Add to UI immediately with temporary ID (like channels)
+    setState(() {
+      _messages.add(msg);
+    });
+
+    // Use HybridStorageService (works offline + P2P) - like channels
+    final result = await HybridStorageService.instance.addMessage(
+      workspaceId: _effectiveWorkspaceId,
+      senderAddress: userAddress!,
+      receiverAddress: widget.memberAddress,
+      messageText: messageText,
+    );
+
+    if (result == null) {
+      // Remove the message if sending failed (like channels)
       setState(() {
-        _messages.add({
-          ...msg,
-          'timestamp': DateTime.now(),
-        });
+        _messages.removeWhere((m) => _getMessageId(m) == tempMessageId);
+        status = 'Failed to send message';
       });
-      
-      final messageText = _messageController.text.trim();
-      _messageController.clear();
-      
-      // Use HybridStorageService (works offline + P2P)
-      final messageId = await HybridStorageService.instance.addMessage(
-        workspaceId: widget.workspaceName,
-        senderAddress: userAddress!,
-        receiverAddress: widget.memberAddress,
-        messageText: messageText,
-      );
-      
-      if (messageId == null) {
-        setState(() {
-          _messages.removeLast();
-          status = 'Failed to send message';
-        });
-      }
+    } else {
+      // Update the local message with the real message_id from server (like channels)
+      // This ensures deduplication works correctly
+      setState(() {
+        final index = _messages.indexWhere((m) => _getMessageId(m) == tempMessageId);
+        if (index >= 0) {
+          _messages[index]['message_id'] = result;
+          // Also update other fields that might come from server
+          _messages[index]['id'] = result;
+        }
+      });
+      print('✅ DM message sent with ID: $result (updated from temp: $tempMessageId)');
     }
   }
 
